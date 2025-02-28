@@ -50,6 +50,14 @@ func TestEventBuffer_Push(t *testing.T) {
 		t.Fatalf("expected error %v but got %v", expectedErrorMsg, err.Error())
 	}
 
+	err = e.Push(newTestEvent(t, "6", true), 194)
+	expectedErrorMsg = "upload chunk size (195) exceeds upload_size_limit_bytes (194)"
+	if err == nil {
+		t.Fatal("error expected")
+	} else if err.Error() != expectedErrorMsg {
+		t.Fatalf("expected error %v but got %v", expectedErrorMsg, err.Error())
+	}
+
 	close(e.buffer)
 
 	events := make([]EventV1, 0, 2)

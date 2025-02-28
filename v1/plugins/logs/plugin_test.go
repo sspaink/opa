@@ -1416,53 +1416,72 @@ func TestPluginRateLimitDropCountStatus(t *testing.T) {
 func TestChunkMaxUploadSizeLimitNDBCacheDropping(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
-	testLogger := test.New()
-
-	ts, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
-	if err != nil {
-		panic(err)
+	tests := []struct {
+		name                           string
+		reportingBufferSizeLimitEvents int64
+	}{
+		{
+			name:                           "using event buffer",
+			reportingBufferSizeLimitEvents: 1,
+		},
+		{
+			name:                           "using size buffer",
+			reportingBufferSizeLimitEvents: 0,
+		},
 	}
 
-	fixture := newTestFixture(t, testFixtureOptions{
-		ConsoleLogger:                  testLogger,
-		ReportingMaxDecisionsPerSecond: float64(1), // 1 decision per second
-		ReportingUploadSizeLimitBytes:  400,
-	})
-	defer fixture.server.stop()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			testLogger := test.New()
 
-	fixture.plugin.metrics = metrics.New()
+			ts, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
+			if err != nil {
+				panic(err)
+			}
 
-	var input interface{} = map[string]interface{}{"method": "GET"}
-	var result interface{} = false
+			fixture := newTestFixture(t, testFixtureOptions{
+				ConsoleLogger:                  testLogger,
+				ReportingMaxDecisionsPerSecond: float64(1), // 1 decision per second
+				ReportingUploadSizeLimitBytes:  400,
+				ReportingBufferSizeLimitEvents: tc.reportingBufferSizeLimitEvents,
+			})
+			defer fixture.server.stop()
 
-	// Purposely oversized NDBCache entry will force dropping during Log().
-	var ndbCacheExample interface{} = ast.MustJSON(builtins.NDBCache{
-		"test.custom_space_waster": ast.NewObject([2]*ast.Term{
-			ast.ArrayTerm(),
-			ast.StringTerm(strings.Repeat("Wasted space... ", 200)),
-		}),
-	}.AsValue())
+			fixture.plugin.metrics = metrics.New()
 
-	event := &server.Info{
-		DecisionID:     "abc",
-		Path:           "foo/bar",
-		Input:          &input,
-		Results:        &result,
-		RemoteAddr:     "test",
-		Timestamp:      ts,
-		NDBuiltinCache: &ndbCacheExample,
-	}
+			var input interface{} = map[string]interface{}{"method": "GET"}
+			var result interface{} = false
 
-	beforeNDBDropCount := fixture.plugin.metrics.Counter(logNDBDropCounterName).Value().(uint64)
-	err = fixture.plugin.Log(ctx, event) // event should be written into the encoder
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterNDBDropCount := fixture.plugin.metrics.Counter(logNDBDropCounterName).Value().(uint64)
+			// Purposely oversized NDBCache entry will force dropping during Log().
+			var ndbCacheExample interface{} = ast.MustJSON(builtins.NDBCache{
+				"test.custom_space_waster": ast.NewObject([2]*ast.Term{
+					ast.ArrayTerm(),
+					ast.StringTerm(strings.Repeat("Wasted space... ", 200)),
+				}),
+			}.AsValue())
 
-	if afterNDBDropCount != beforeNDBDropCount+1 {
-		t.Fatalf("Expected %v NDBCache drop events, saw %v events instead.", beforeNDBDropCount+1, afterNDBDropCount)
+			event := &server.Info{
+				DecisionID:     "abc",
+				Path:           "foo/bar",
+				Input:          &input,
+				Results:        &result,
+				RemoteAddr:     "test",
+				Timestamp:      ts,
+				NDBuiltinCache: &ndbCacheExample,
+			}
+
+			beforeNDBDropCount := fixture.plugin.metrics.Counter(logNDBDropCounterName).Value().(uint64)
+			err = fixture.plugin.Log(ctx, event) // event should be written into the encoder
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterNDBDropCount := fixture.plugin.metrics.Counter(logNDBDropCounterName).Value().(uint64)
+
+			if afterNDBDropCount != beforeNDBDropCount+1 {
+				t.Fatalf("Expected %v NDBCache drop events, saw %v events instead.", beforeNDBDropCount+1, afterNDBDropCount)
+			}
+		})
 	}
 }
 
@@ -2572,6 +2591,7 @@ func TestPluginDropErrorHandling(t *testing.T) {
 
 type testFixtureOptions struct {
 	ConsoleLogger                  *test.Logger
+	ReportingBufferSizeLimitEvents int64
 	ReportingUploadSizeLimitBytes  int64
 	ReportingMaxDecisionsPerSecond float64
 	ReportingBufferSizeLimitBytes  int64
@@ -2687,6 +2707,10 @@ func newTestFixture(t *testing.T, opts ...testFixtureOptions) testFixture {
 
 	if options.ReportingBufferSizeLimitBytes != 0 {
 		config.Reporting.BufferSizeLimitBytes = &options.ReportingBufferSizeLimitBytes
+	}
+
+	if options.ReportingBufferSizeLimitEvents != 0 {
+		config.Reporting.BufferSizeLimitEvents = &options.ReportingBufferSizeLimitEvents
 	}
 
 	if s, ok := manager.PluginStatus()[Name]; ok {

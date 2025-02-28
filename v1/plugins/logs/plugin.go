@@ -369,8 +369,16 @@ func (c *Config) validateAndInjectDefaults(services []string, pluginsList []stri
 
 	c.Reporting.UploadSizeLimitBytes = &uploadLimit
 
+	if c.Reporting.BufferSizeLimitBytes != nil && c.Reporting.BufferSizeLimitEvents != nil {
+		return errors.New("invalid decision_log config, specify either 'buffer_size_limit_bytes' or 'buffer_size_limit_events'")
+	}
+
 	if c.Reporting.BufferSizeLimitBytes != nil && c.Reporting.MaxDecisionsPerSecond != nil {
 		return errors.New("invalid decision_log config, specify either 'buffer_size_limit_bytes' or 'max_decisions_per_second'")
+	}
+
+	if c.Reporting.BufferSizeLimitEvents != nil && *c.Reporting.BufferSizeLimitEvents <= int64(0) {
+		return errors.New("invalid decision_log config, 'buffer_size_limit_events' should be greater than 0")
 	}
 
 	// default the buffer size limit
@@ -893,7 +901,7 @@ func (p *Plugin) oneShot(ctx context.Context) (ok bool, err error) {
 		p.eventBuffer.Stop <- done
 		<-done
 
-		go p.eventBuffer.Upload(ctx, p.manager.Client(p.config.Service), *p.config.Reporting.BufferSizeLimitBytes, *p.config.Resource)
+		go p.eventBuffer.Upload(ctx, p.manager.Client(p.config.Service), *p.config.Reporting.UploadSizeLimitBytes, *p.config.Resource)
 		return
 	}
 
