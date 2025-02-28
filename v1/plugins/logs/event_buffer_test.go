@@ -12,16 +12,44 @@ import (
 	"testing"
 	"time"
 
+	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/keys"
 	"github.com/open-policy-agent/opa/v1/plugins/rest"
+	"github.com/open-policy-agent/opa/v1/topdown/builtins"
 )
 
 func TestEventBuffer_Push(t *testing.T) {
 	limit := int64(2)
 	e := newEventBuffer(limit)
-	e.Push(newTestEvent(t, "1"))
-	e.Push(newTestEvent(t, "2"))
-	e.Push(newTestEvent(t, "3"))
+	err := e.Push(newTestEvent(t, "1", false), 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.Push(newTestEvent(t, "2", false), 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.Push(newTestEvent(t, "3", false), 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = e.Push(newTestEvent(t, "4", false), 100)
+	expectedErrorMsg := "upload chunk size (195) exceeds upload_size_limit_bytes (100)"
+	if err == nil {
+		t.Fatal("error expected")
+	} else if err.Error() != expectedErrorMsg {
+		t.Fatalf("expected error %v but got %v", expectedErrorMsg, err.Error())
+	}
+
+	err = e.Push(newTestEvent(t, "5", true), 195)
+	expectedErrorMsg = droppedNDCacheError{}.Error()
+	if err == nil {
+		t.Fatal("error expected")
+	} else if err.Error() != expectedErrorMsg {
+		t.Fatalf("expected error %v but got %v", expectedErrorMsg, err.Error())
+	}
+
 	close(e.buffer)
 
 	events := make([]EventV1, 0, 2)
@@ -130,7 +158,10 @@ func TestEventBuffer_Upload(t *testing.T) {
 			e := newEventBuffer(tc.eventLimit)
 
 			for i := range tc.numberOfEvents {
-				e.Push(newTestEvent(t, strconv.Itoa(i)))
+				err := e.Push(newTestEvent(t, strconv.Itoa(i), false), tc.uploadSizeLimitBytes)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			client, ts := setupTestServer(t, uploadPath, tc.handleFunc)
@@ -154,7 +185,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 	}
 }
 
-func newTestEvent(t *testing.T, ID string) []byte {
+func newTestEvent(t *testing.T, ID string, enableNDCache bool) EventV1 {
 	var result interface{} = false
 	var expInput interface{} = map[string]interface{}{"method": "GET"}
 	timestamp, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
@@ -174,12 +205,17 @@ func newTestEvent(t *testing.T, ID string) []byte {
 		Timestamp:   timestamp,
 	}
 
-	b, err := json.Marshal(&e)
-	if err != nil {
-		t.Fatal(err)
+	if enableNDCache {
+		var ndbCacheExample = ast.MustJSON(builtins.NDBCache{
+			"time.now_ns": ast.NewObject([2]*ast.Term{
+				ast.ArrayTerm(),
+				ast.NumberTerm("1663803565571081429"),
+			}),
+		}.AsValue())
+		e.NDBuiltinCache = &ndbCacheExample
 	}
 
-	return b
+	return e
 }
 
 func setupTestServer(t *testing.T, uploadPath string, handleFunc func(w http.ResponseWriter, r *http.Request)) (rest.Client, *httptest.Server) {

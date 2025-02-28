@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/open-policy-agent/opa/v1/plugins/rest"
 )
@@ -25,9 +27,41 @@ func newEventBuffer(limit int64) *eventBuffer {
 	}
 }
 
+type droppedNDCacheError struct {
+}
+
+func (d droppedNDCacheError) Error() string {
+	return "ND builtins cache dropped from this event to fit under maximum upload size limits. Increase upload size limit or change usage of non-deterministic builtins."
+}
+
 // Push adds a new event to the buffer, if full drops the oldest
-func (e *eventBuffer) Push(event []byte) {
-	push(e.buffer, event)
+func (e *eventBuffer) Push(event EventV1, uploadSizeLimitBytes int64) error {
+	var err error
+	result, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+
+	// If event is bigger than UploadSizeLimitBytes, try to drop the NDBuiltinCache.
+	// If the event is still too big, drop the event.
+	if int64(len(result)) > uploadSizeLimitBytes {
+		if event.NDBuiltinCache == nil {
+			return fmt.Errorf("upload chunk size (%d) exceeds upload_size_limit_bytes (%d)", int64(len(result)), uploadSizeLimitBytes)
+		}
+		event.NDBuiltinCache = nil
+		result, err = json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		if int64(len(result)) > uploadSizeLimitBytes {
+			return fmt.Errorf("upload chunk size (%d) exceeds upload_size_limit_bytes (%d)", int64(len(result)), uploadSizeLimitBytes)
+		}
+
+		err = droppedNDCacheError{}
+	}
+
+	push(e.buffer, result)
+	return err
 }
 
 // pushError holds the most recent error, used to set the log plugins Status
@@ -68,7 +102,7 @@ func (e *eventBuffer) Upload(ctx context.Context, client rest.Client, uploadSize
 				}
 
 				// Requeue the event that exceeded the upload size limit
-				e.Push(event)
+				push(e.buffer, event)
 				return
 			}
 

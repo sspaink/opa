@@ -966,49 +966,22 @@ func (p *Plugin) reconfigure(config interface{}) {
 // decision log entry size, we do best-effort event encoding here, and when we
 // run out of space, we drop the ND builtins cache, and try encoding again.
 func (p *Plugin) encodeAndBufferEvent(event EventV1) {
-	if p.limiter != nil {
-		if !p.limiter.Allow() {
-			if p.metrics != nil {
-				p.metrics.Counter(logRateLimitExDropCounterName).Incr()
-			}
-
-			p.logger.Error("Decision log dropped as rate limit exceeded. Reduce reporting interval or increase rate limit.")
-			return
-		}
+	if p.limiter != nil && !p.limiter.Allow() {
+		p.addMetric(logRateLimitExDropCounterName)
+		p.logger.Error("Decision log dropped as rate limit exceeded. Reduce reporting interval or increase rate limit.")
+		return
 	}
 
 	if p.eventBufferEnabled {
-		result, err := json.Marshal(event)
+		err := p.eventBuffer.Push(event, *p.config.Reporting.UploadSizeLimitBytes)
 		if err != nil {
-			if p.metrics != nil {
-				p.metrics.Counter(logEncodingFailureCounterName).Incr()
+			if errors.As(err, &droppedNDCacheError{}) {
+				p.addMetric(logNDBDropCounterName)
+			} else {
+				p.addMetric(logEncodingFailureCounterName)
 			}
 			p.logger.Error("Log encoding failed: %v.", err)
-			return
 		}
-
-		// If event is bigger than UploadSizeLimitBytes, try to drop the NDBuiltinCache.
-		// If the event is still too big, drop the event.
-		if int64(len(result)) > *p.config.Reporting.UploadSizeLimitBytes && event.NDBuiltinCache != nil {
-			event.NDBuiltinCache = nil
-			result, err = json.Marshal(event)
-			if err != nil {
-				if p.metrics != nil {
-					p.metrics.Counter(logEncodingFailureCounterName).Incr()
-				}
-				p.logger.Error("Log encoding failed: %v.", err)
-				return
-			}
-			if int64(len(result)) > *p.config.Reporting.UploadSizeLimitBytes {
-				p.logger.Error("Log encoding failed: upload chunk size (%d) exceeds upload_size_limit_bytes (%d)", int64(len(result)), *p.config.Reporting.UploadSizeLimitBytes)
-				return
-			}
-
-			p.logger.Error("ND builtins cache dropped from this event to fit under maximum upload size limits. Increase upload size limit or change usage of non-deterministic builtins.")
-			p.metrics.Counter(logNDBDropCounterName).Incr()
-		}
-
-		p.eventBuffer.Push(result)
 		return
 	}
 
@@ -1021,9 +994,7 @@ func (p *Plugin) encodeAndBufferEvent(event EventV1) {
 			// can return an error. Should the default behaviour be to
 			// fail-closed as we do for plugins?
 
-			if p.metrics != nil {
-				p.metrics.Counter(logEncodingFailureCounterName).Incr()
-			}
+			p.addMetric(logEncodingFailureCounterName)
 			p.logger.Error("Log encoding failed: %v.", err)
 			return
 		}
@@ -1034,16 +1005,14 @@ func (p *Plugin) encodeAndBufferEvent(event EventV1) {
 
 		result, err = p.encodeEvent(newEvent)
 		if err != nil {
-			if p.metrics != nil {
-				p.metrics.Counter(logEncodingFailureCounterName).Incr()
-			}
+			p.addMetric(logEncodingFailureCounterName)
 			p.logger.Error("Log encoding failed: %v.", err)
 			return
 		}
 
 		// Re-encoding was successful, but we still need to alert users.
-		p.logger.Error("ND builtins cache dropped from this event to fit under maximum upload size limits. Increase upload size limit or change usage of non-deterministic builtins.")
-		p.metrics.Counter(logNDBDropCounterName).Incr()
+		p.logger.Error(droppedNDCacheError{}.Error())
+		p.addMetric(logNDBDropCounterName)
 	}
 
 	p.mtx.Lock()
@@ -1067,9 +1036,7 @@ func (p *Plugin) encodeEvent(event EventV1) ([][]byte, error) {
 func (p *Plugin) bufferChunk(buffer *logBuffer, bs []byte) {
 	dropped := buffer.Push(bs)
 	if dropped > 0 {
-		if p.metrics != nil {
-			p.metrics.Counter(logBufferSizeLimitExDropCounterName).Incr()
-		}
+		p.addMetric(logBufferSizeLimitExDropCounterName)
 		p.logger.Error("Dropped %v chunks from buffer. Reduce reporting interval or increase buffer size.", dropped)
 	}
 }
@@ -1204,4 +1171,10 @@ func (p *Plugin) logEvent(event EventV1) error {
 		"type": "openpolicyagent.org/decision_logs",
 	}).Info("Decision Log")
 	return nil
+}
+
+func (p *Plugin) addMetric(name string) {
+	if p.metrics != nil {
+		p.metrics.Counter(name).Incr()
+	}
 }
