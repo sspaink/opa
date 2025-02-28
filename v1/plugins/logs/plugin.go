@@ -265,6 +265,7 @@ const (
 
 // ReportingConfig represents configuration for the plugin's reporting behaviour.
 type ReportingConfig struct {
+	BufferSizeLimitEvents *int64               `json:"buffer_size_limit_events,omitempty"` // max number of events the buffer will hold
 	BufferSizeLimitBytes  *int64               `json:"buffer_size_limit_bytes,omitempty"`  // max size of in-memory buffer
 	UploadSizeLimitBytes  *int64               `json:"upload_size_limit_bytes,omitempty"`  // max size of upload payload
 	MinDelaySeconds       *int64               `json:"min_delay_seconds,omitempty"`        // min amount of time to wait between successful poll attempts
@@ -417,20 +418,22 @@ func (c *Config) validateAndInjectDefaults(services []string, pluginsList []stri
 
 // Plugin implements decision log buffering and uploading.
 type Plugin struct {
-	manager      *plugins.Manager
-	config       Config
-	buffer       *logBuffer
-	enc          *chunkEncoder
-	mtx          sync.Mutex
-	statusMtx    sync.Mutex
-	stop         chan chan struct{}
-	reconfig     chan reconfigure
-	preparedMask prepareOnce
-	preparedDrop prepareOnce
-	limiter      *rate.Limiter
-	metrics      metrics.Metrics
-	logger       logging.Logger
-	status       *lstat.Status
+	manager            *plugins.Manager
+	config             Config
+	eventBufferEnabled bool
+	eventBuffer        *eventBuffer
+	buffer             *logBuffer
+	enc                *chunkEncoder
+	mtx                sync.Mutex
+	statusMtx          sync.Mutex
+	stop               chan chan struct{}
+	reconfig           chan reconfigure
+	preparedMask       prepareOnce
+	preparedDrop       prepareOnce
+	limiter            *rate.Limiter
+	metrics            metrics.Metrics
+	logger             logging.Logger
+	status             *lstat.Status
 }
 
 type prepareOnce struct {
@@ -540,13 +543,19 @@ func New(parsedConfig *Config, manager *plugins.Manager) *Plugin {
 		manager:      manager,
 		config:       *parsedConfig,
 		stop:         make(chan chan struct{}),
-		buffer:       newLogBuffer(*parsedConfig.Reporting.BufferSizeLimitBytes),
 		enc:          newChunkEncoder(*parsedConfig.Reporting.UploadSizeLimitBytes),
 		reconfig:     make(chan reconfigure),
 		logger:       manager.Logger().WithFields(map[string]interface{}{"plugin": Name}),
 		status:       &lstat.Status{},
 		preparedDrop: *newPrepareOnce(),
 		preparedMask: *newPrepareOnce(),
+	}
+
+	if parsedConfig.Reporting.BufferSizeLimitEvents != nil {
+		plugin.eventBuffer = newEventBuffer(*parsedConfig.Reporting.BufferSizeLimitEvents)
+		plugin.eventBufferEnabled = true
+	} else {
+		plugin.buffer = newLogBuffer(*parsedConfig.Reporting.BufferSizeLimitBytes)
 	}
 
 	if parsedConfig.Reporting.MaxDecisionsPerSecond != nil {
@@ -732,7 +741,7 @@ func (p *Plugin) Log(ctx context.Context, decision *server.Info) error {
 }
 
 // Reconfigure notifies the plugin with a new configuration.
-func (p *Plugin) Reconfigure(_ context.Context, config interface{}) {
+func (p *Plugin) Reconfigure(ctx context.Context, config interface{}) {
 
 	done := make(chan struct{})
 	p.reconfig <- reconfigure{config: config, done: done}
@@ -741,6 +750,20 @@ func (p *Plugin) Reconfigure(_ context.Context, config interface{}) {
 	p.preparedDrop.drop()
 
 	<-done
+
+	// Reconfigured to switch buffer type from a size buffer to an event buffer because BufferSizeLimitEvents is now set
+	if !p.eventBufferEnabled && p.config.Reporting.BufferSizeLimitEvents != nil {
+		p.Stop(ctx)
+		p.eventBuffer = newEventBuffer(*p.config.Reporting.BufferSizeLimitEvents)
+		p.eventBufferEnabled = true
+		_ = p.Start(nil)
+		// Reconfigured to switch buffer type from an event buffer to a size buffer because BufferSizeLimitEvents was unset
+	} else if p.eventBufferEnabled && p.config.Reporting.BufferSizeLimitEvents == nil {
+		p.Stop(ctx)
+		p.buffer = newLogBuffer(*p.config.Reporting.BufferSizeLimitBytes)
+		p.eventBufferEnabled = false
+		_ = p.Start(nil)
+	}
 }
 
 // Trigger can be used to control when the plugin attempts to upload
@@ -779,6 +802,10 @@ func (p *Plugin) compilerUpdated(storage.Transaction) {
 func (p *Plugin) loop() {
 
 	ctx, cancel := context.WithCancel(context.Background())
+
+	if p.eventBufferEnabled {
+		go p.eventBuffer.Upload(context.Background(), p.manager.Client(p.config.Service), *p.config.Reporting.UploadSizeLimitBytes, *p.config.Resource)
+	}
 
 	var retry int
 
@@ -824,6 +851,12 @@ func (p *Plugin) loop() {
 			p.reconfigure(update.config)
 			update.done <- struct{}{}
 		case done := <-p.stop:
+			if p.eventBufferEnabled {
+				stopEventBuffer := make(chan struct{})
+				p.eventBuffer.Stop <- stopEventBuffer
+				<-stopEventBuffer
+			}
+
 			cancel()
 			done <- struct{}{}
 			return
@@ -834,7 +867,7 @@ func (p *Plugin) loop() {
 func (p *Plugin) doOneShot(ctx context.Context) error {
 	uploaded, err := p.oneShot(ctx)
 
-	// Make a local copy of the plugins's status.
+	// Make a local copy of the plugin's status.
 	p.statusMtx.Lock()
 	p.status.SetError(err)
 	oldStatus := p.status
@@ -855,7 +888,16 @@ func (p *Plugin) doOneShot(ctx context.Context) error {
 }
 
 func (p *Plugin) oneShot(ctx context.Context) (ok bool, err error) {
-	// Make a local copy of the plugins's encoder and buffer and create
+	if p.eventBufferEnabled {
+		done := make(chan struct{})
+		p.eventBuffer.Stop <- done
+		<-done
+
+		go p.eventBuffer.Upload(ctx, p.manager.Client(p.config.Service), *p.config.Reporting.BufferSizeLimitBytes, *p.config.Resource)
+		return
+	}
+
+	// Make a local copy of the plugin's encoder and buffer and create
 	// a new encoder and buffer. This is needed as locking the buffer for
 	// the upload duration will block policy evaluation and result in
 	// increased latency for OPA clients
@@ -909,7 +951,6 @@ func (p *Plugin) oneShot(ctx context.Context) (ok bool, err error) {
 }
 
 func (p *Plugin) reconfigure(config interface{}) {
-
 	newConfig := config.(*Config)
 
 	if reflect.DeepEqual(p.config, *newConfig) {
@@ -934,6 +975,41 @@ func (p *Plugin) encodeAndBufferEvent(event EventV1) {
 			p.logger.Error("Decision log dropped as rate limit exceeded. Reduce reporting interval or increase rate limit.")
 			return
 		}
+	}
+
+	if p.eventBufferEnabled {
+		result, err := json.Marshal(event)
+		if err != nil {
+			if p.metrics != nil {
+				p.metrics.Counter(logEncodingFailureCounterName).Incr()
+			}
+			p.logger.Error("Log encoding failed: %v.", err)
+			return
+		}
+
+		// If event is bigger than UploadSizeLimitBytes, try to drop the NDBuiltinCache.
+		// If the event is still too big, drop the event.
+		if int64(len(result)) > *p.config.Reporting.UploadSizeLimitBytes && event.NDBuiltinCache != nil {
+			event.NDBuiltinCache = nil
+			result, err = json.Marshal(event)
+			if err != nil {
+				if p.metrics != nil {
+					p.metrics.Counter(logEncodingFailureCounterName).Incr()
+				}
+				p.logger.Error("Log encoding failed: %v.", err)
+				return
+			}
+			if int64(len(result)) > *p.config.Reporting.UploadSizeLimitBytes {
+				p.logger.Error("Log encoding failed: upload chunk size (%d) exceeds upload_size_limit_bytes (%d)", int64(len(result)), *p.config.Reporting.UploadSizeLimitBytes)
+				return
+			}
+
+			p.logger.Error("ND builtins cache dropped from this event to fit under maximum upload size limits. Increase upload size limit or change usage of non-deterministic builtins.")
+			p.metrics.Counter(logNDBDropCounterName).Incr()
+		}
+
+		p.eventBuffer.Push(result)
+		return
 	}
 
 	result, err := p.encodeEvent(event)

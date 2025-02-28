@@ -18,7 +18,7 @@ import (
 
 func TestEventBuffer_Push(t *testing.T) {
 	limit := int64(2)
-	e := NewEventBuffer(limit)
+	e := newEventBuffer(limit)
 	e.Push(newTestEvent(t, "1"))
 	e.Push(newTestEvent(t, "2"))
 	e.Push(newTestEvent(t, "3"))
@@ -51,7 +51,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 		numberOfEvents       int
 		uploadSizeLimitBytes int64
 		handleFunc           func(w http.ResponseWriter, r *http.Request)
-		postUploadFunc       func(e *EventBuffer)
+		postUploadFunc       func(e *eventBuffer)
 		expectedError        string
 	}{
 		{
@@ -67,7 +67,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 
 				w.WriteHeader(http.StatusOK)
 			},
-			postUploadFunc: func(e *EventBuffer) {
+			postUploadFunc: func(e *eventBuffer) {
 				// Wait until buffer is empty
 				for len(e.buffer) != 0 {
 					time.Sleep(1 * time.Second)
@@ -96,7 +96,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 				}
 				w.WriteHeader(http.StatusOK)
 			},
-			postUploadFunc: func(e *EventBuffer) {
+			postUploadFunc: func(e *eventBuffer) {
 				// Wait until buffer has only 2 events left
 				for len(e.buffer) != 2 {
 					time.Sleep(1 * time.Second)
@@ -111,7 +111,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 			handleFunc: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
 			},
-			postUploadFunc: func(e *EventBuffer) {
+			postUploadFunc: func(e *eventBuffer) {
 				// Wait until buffer is empty
 				for len(e.buffer) != 0 {
 					time.Sleep(1 * time.Second)
@@ -127,7 +127,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			e := NewEventBuffer(tc.eventLimit)
+			e := newEventBuffer(tc.eventLimit)
 
 			for i := range tc.numberOfEvents {
 				e.Push(newTestEvent(t, strconv.Itoa(i)))
@@ -141,7 +141,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 			tc.postUploadFunc(e)
 
 			select {
-			case err := <-e.Errors:
+			case err := <-e.Error:
 				if tc.expectedError != "" && err.Error() != tc.expectedError {
 					t.Fatal(err)
 				}
@@ -189,10 +189,10 @@ func setupTestServer(t *testing.T, uploadPath string, handleFunc func(w http.Res
 	mux.HandleFunc(uploadPath, handleFunc)
 
 	config := fmt.Sprintf(`{
-				"name": "foo",
-				"url": %q,
-				"response_header_timeout_seconds": 20,
-			}`, ts.URL)
+		"name": "foo",
+		"url": %q,
+		"response_header_timeout_seconds": 20,
+	}`, ts.URL)
 	ks := map[string]*keys.Config{}
 	client, err := rest.New([]byte(config), ks)
 	if err != nil {

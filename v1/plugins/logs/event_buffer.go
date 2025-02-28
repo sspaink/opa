@@ -10,29 +10,29 @@ import (
 
 // EventBuffer stores and uploads JSON encoded EventV1 data.
 // The oldest events will be dropped if the buffer is full.
-type EventBuffer struct {
+type eventBuffer struct {
 	buffer chan []byte
 
-	Stop   chan chan struct{}
-	Errors chan error
+	Stop  chan chan struct{}
+	Error chan error
 }
 
-func NewEventBuffer(limit int64) *EventBuffer {
-	return &EventBuffer{
+func newEventBuffer(limit int64) *eventBuffer {
+	return &eventBuffer{
 		buffer: make(chan []byte, limit),
 		Stop:   make(chan chan struct{}),
-		Errors: make(chan error, 1),
+		Error:  make(chan error, 1),
 	}
 }
 
 // Push adds a new event to the buffer, if full drops the oldest
-func (e *EventBuffer) Push(event []byte) {
+func (e *eventBuffer) Push(event []byte) {
 	push(e.buffer, event)
 }
 
 // pushError holds the most recent error, used to set the log plugins Status
-func (e *EventBuffer) pushError(err error) {
-	push(e.Errors, err)
+func (e *eventBuffer) pushError(err error) {
+	push(e.Error, err)
 }
 
 func push[T any](ch chan T, data T) {
@@ -47,7 +47,7 @@ func push[T any](ch chan T, data T) {
 // Upload reads events from the buffer to create a gzip compressed JSON array of events.
 // Events will be read until either the upload size limit is reached or a stop signal is sent.
 // Once a stopping condition is met, the JSON events array will be uploaded to the configured service.
-func (e *EventBuffer) Upload(ctx context.Context, client rest.Client, uploadSizeLimitBytes int64, uploadPath string) {
+func (e *eventBuffer) Upload(ctx context.Context, client rest.Client, uploadSizeLimitBytes int64, uploadPath string) {
 	var bytesWritten int
 	uploadBuffer := new(bytes.Buffer)
 	w := gzip.NewWriter(uploadBuffer)
