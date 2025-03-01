@@ -104,7 +104,6 @@ func TestEventBuffer_Upload(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			},
 			postUploadFunc: func(e *eventBuffer) {
-				// Wait until buffer is empty
 				for len(e.buffer) != 0 {
 					time.Sleep(1 * time.Second)
 				}
@@ -133,8 +132,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			},
 			postUploadFunc: func(e *eventBuffer) {
-				// Wait until buffer has only 2 events left
-				for len(e.buffer) != 2 {
+				for len(e.buffer) != 0 {
 					time.Sleep(1 * time.Second)
 				}
 			},

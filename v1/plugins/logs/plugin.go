@@ -902,7 +902,13 @@ func (p *Plugin) oneShot(ctx context.Context) (ok bool, err error) {
 		<-done
 
 		go p.eventBuffer.Upload(ctx, p.manager.Client(p.config.Service), *p.config.Reporting.UploadSizeLimitBytes, *p.config.Resource)
-		return
+
+		select {
+		case err := <-p.eventBuffer.Error:
+			return false, err
+		default:
+			return true, nil
+		}
 	}
 
 	// Make a local copy of the plugin's encoder and buffer and create

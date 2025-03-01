@@ -17,6 +17,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"runtime/pprof"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1485,6 +1487,30 @@ func TestChunkMaxUploadSizeLimitNDBCacheDropping(t *testing.T) {
 	}
 }
 
+func TestPluginEventLimitBadConfig(t *testing.T) {
+	t.Parallel()
+
+	manager, _ := plugins.New(nil, "test-instance-id", inmem.New())
+
+	pluginConfig := []byte(fmt.Sprintf(`{
+			"console": true,
+			"reporting": {
+				"buffer_size_limit_bytes": %v,
+				"buffer_size_limit_events": %v
+			}
+		}`, 1, 1))
+
+	_, err := ParseConfig(pluginConfig, manager.Services(), nil)
+	if err == nil {
+		t.Fatal("Expected error but got nil")
+	}
+
+	expected := "invalid decision_log config, specify either 'buffer_size_limit_bytes' or 'buffer_size_limit_events'"
+	if err.Error() != expected {
+		t.Fatalf("Expected error message %v but got %v", expected, err.Error())
+	}
+}
+
 func TestPluginRateLimitBadConfig(t *testing.T) {
 	t.Parallel()
 
@@ -1553,80 +1579,104 @@ func TestPluginTriggerManual(t *testing.T) {
 
 	ctx := context.Background()
 
-	fixture := newTestFixture(t)
-	defer fixture.server.stop()
-
-	fixture.server.server.Config.SetKeepAlivesEnabled(false)
-
-	fixture.server.ch = make(chan []EventV1, 4)
-	tr := plugins.TriggerManual
-	fixture.plugin.config.Reporting.Trigger = &tr
-
-	if err := fixture.plugin.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	testMetrics := getWellKnownMetrics()
-	msAsFloat64 := map[string]interface{}{}
-	for k, v := range testMetrics.All() {
-		msAsFloat64[k] = float64(v.(uint64))
-	}
-
-	var input interface{} = map[string]interface{}{"method": "GET"}
-	var result interface{} = false
-
-	ts, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
-	if err != nil {
-		panic(err)
-	}
-
-	exp := EventV1{
-		Labels: map[string]string{
-			"id":      "test-instance-id",
-			"app":     "example-app",
-			"version": version.Version,
+	tests := []struct {
+		name                           string
+		reportingBufferSizeLimitEvents int64
+	}{
+		{
+			name:                           "using event buffer",
+			reportingBufferSizeLimitEvents: 10,
 		},
-		Path:        "tda/bar",
-		Input:       &input,
-		Result:      &result,
-		RequestedBy: "test",
-		Timestamp:   ts,
-		Metrics:     msAsFloat64,
+		{
+			name:                           "using size buffer",
+			reportingBufferSizeLimitEvents: 0,
+		},
 	}
 
-	for i := 0; i < 400; i++ {
-		fixture.plugin.Log(ctx, &server.Info{
-			Revision:   fmt.Sprint(i),
-			DecisionID: fmt.Sprint(i),
-			Path:       "tda/bar",
-			Input:      &input,
-			Results:    &result,
-			RemoteAddr: "test",
-			Timestamp:  ts,
-			Metrics:    testMetrics,
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newTestFixture(t, testFixtureOptions{
+				ReportingBufferSizeLimitEvents: tc.reportingBufferSizeLimitEvents,
+			})
+			defer fixture.server.stop()
+
+			fixture.server.server.Config.SetKeepAlivesEnabled(false)
+
+			fixture.server.ch = make(chan []EventV1, 4)
+			tr := plugins.TriggerManual
+			fixture.plugin.config.Reporting.Trigger = &tr
+
+			if err := fixture.plugin.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			testMetrics := getWellKnownMetrics()
+			msAsFloat64 := map[string]interface{}{}
+			for k, v := range testMetrics.All() {
+				msAsFloat64[k] = float64(v.(uint64))
+			}
+
+			var input interface{} = map[string]interface{}{"method": "GET"}
+			var result interface{} = false
+
+			ts, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
+			if err != nil {
+				panic(err)
+			}
+
+			exp := EventV1{
+				Labels: map[string]string{
+					"id":      "test-instance-id",
+					"app":     "example-app",
+					"version": version.Version,
+				},
+				Path:        "tda/bar",
+				Input:       &input,
+				Result:      &result,
+				RequestedBy: "test",
+				Timestamp:   ts,
+				Metrics:     msAsFloat64,
+			}
+
+			for i := 0; i < 400; i++ {
+				fixture.plugin.Log(ctx, &server.Info{
+					Revision:   fmt.Sprint(i),
+					DecisionID: fmt.Sprint(i),
+					Path:       "tda/bar",
+					Input:      &input,
+					Results:    &result,
+					RemoteAddr: "test",
+					Timestamp:  ts,
+					Metrics:    testMetrics,
+				})
+
+				// trigger the decision log upload
+				go func(i int) {
+					labels := pprof.Labels("trigger", strconv.Itoa(i))
+					pprof.Do(context.Background(), labels, func(_ context.Context) {
+						_ = fixture.plugin.Trigger(ctx)
+					})
+				}(i)
+
+				fmt.Println("waiting")
+				chunk := <-fixture.server.ch
+
+				expLen := 1
+				if len(chunk) != 1 {
+					t.Fatalf("Expected chunk len %v but got: %v", expLen, len(chunk))
+				}
+
+				exp.Revision = fmt.Sprint(i)
+				exp.DecisionID = fmt.Sprint(i)
+
+				if !reflect.DeepEqual(chunk[0], exp) {
+					t.Fatalf("Expected %+v but got %+v", exp, chunk[0])
+				}
+			}
+
+			fixture.plugin.Stop(ctx)
 		})
-
-		// trigger the decision log upload
-		go func() {
-			fixture.plugin.Trigger(ctx)
-		}()
-
-		chunk := <-fixture.server.ch
-
-		expLen := 1
-		if len(chunk) != 1 {
-			t.Fatalf("Expected chunk len %v but got: %v", expLen, len(chunk))
-		}
-
-		exp.Revision = fmt.Sprint(i)
-		exp.DecisionID = fmt.Sprint(i)
-
-		if !reflect.DeepEqual(chunk[0], exp) {
-			t.Fatalf("Expected %+v but got %+v", exp, chunk[0])
-		}
 	}
-
-	fixture.plugin.Stop(ctx)
 }
 
 func TestPluginTriggerManualWithTimeout(t *testing.T) {
