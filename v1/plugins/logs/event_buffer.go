@@ -10,9 +10,9 @@ import (
 	"github.com/open-policy-agent/opa/v1/plugins/rest"
 )
 
-// eventBuffer stores and uploads gzipped JSON encoded EventV1 data
+// eventBuffer stores and uploads a gzip compressed JSON array of EventV1
 type eventBuffer struct {
-	Stop  chan chan struct{} // Stop is used to end the upload early, flushing the current buffer state
+	Stop  chan chan struct{} // Stop is used to end the upload early, flushing the current buffer
 	Error chan error         // Error contains the latest error thrown during the upload loop
 
 	buffer               chan []byte   // buffer is a buffered channel storing the JSON encoded EventV1 data
@@ -32,18 +32,14 @@ func newEventBuffer(limit int64) *eventBuffer {
 	}
 }
 
-type droppedNDCacheError struct {
+type droppedNDCache struct {
 }
 
-func (d droppedNDCacheError) Error() string {
+func (d droppedNDCache) Error() string {
 	return "ND builtins cache dropped from this event to fit under maximum upload size limits. Increase upload size limit or change usage of non-deterministic builtins."
 }
 
-// Push adds a new event to the buffer.
-// Reasons for an event to be dropped:
-// * Invalid JSON
-// * If the event is bigger than the limit (attempts to reduce the size by removing the non-deterministic cache)
-// * If the buffer is full drops the oldest event is dropped
+// Push attempts to add a new event to the buffer.
 func (e *eventBuffer) Push(event EventV1, uploadSizeLimitBytes int64) error {
 	var err error
 	result, err := json.Marshal(event)
@@ -66,7 +62,7 @@ func (e *eventBuffer) Push(event EventV1, uploadSizeLimitBytes int64) error {
 			return fmt.Errorf("upload chunk size (%d) exceeds upload_size_limit_bytes (%d)", int64(len(result)), uploadSizeLimitBytes)
 		}
 
-		err = droppedNDCacheError{}
+		err = droppedNDCache{}
 	}
 
 	push(e.buffer, result)
@@ -87,32 +83,29 @@ func push[T any](ch chan T, data T) {
 	}
 }
 
-// Upload reads events from the buffer to create a gzip compressed JSON array of events.
-// Events will be read until either the upload size limit is reached or a stop signal is sent.
-// Once a stopping condition is met, the JSON events array (stored in uploadBuffer) will be uploaded.
-// When stopped using the Stop channel, the current content in the buffer is flushed and uploaded.
-// Upload should run in a goroutine and be closed with the Stop channel before starting another.
+func (e *eventBuffer) newUploadBuffer() {
+	e.bytesWritten = 0
+	e.uploadBuffer = new(bytes.Buffer)
+	e.writer = gzip.NewWriter(e.uploadBuffer)
+}
+
+// Upload reads events from the buffer to create a gzip compressed JSON array of events to upload to a service
 func (e *eventBuffer) Upload(ctx context.Context, client rest.Client, uploadSizeLimitBytes int64, uploadPath string) {
+	// These values can be reconfigured by the user therefore need to be reset each upload
 	e.client = client
 	e.uploadPath = uploadPath
 	e.uploadSizeLimitBytes = uploadSizeLimitBytes
 
-	// new upload buffer, reset after each upload
-	e.bytesWritten = 0
-	e.uploadBuffer = new(bytes.Buffer)
-	e.writer = gzip.NewWriter(e.uploadBuffer)
+	e.newUploadBuffer()
 
 	for {
 		select {
 		case event := <-e.buffer:
-			err := e.processEvent(ctx, event)
-			if err != nil {
+			if err := e.processEvent(ctx, event); err != nil {
 				e.pushError(err)
 				return
 			}
 		case done := <-e.Stop:
-			// Flush the current events stored in the buffer.
-			// Prevent events being stuck in the buffer due to aggressive upload requests.
 			if err := e.flush(ctx, len(e.buffer)); err != nil {
 				e.pushError(err)
 			}
@@ -134,8 +127,7 @@ func (e *eventBuffer) flush(ctx context.Context, len int) error {
 	for range len {
 		select {
 		case event := <-e.buffer:
-			err := e.processEvent(ctx, event)
-			if err != nil {
+			if err := e.processEvent(ctx, event); err != nil {
 				return err
 			}
 		default:
@@ -151,8 +143,6 @@ func (e *eventBuffer) processEvent(ctx context.Context, event []byte) error {
 		return nil
 	}
 
-	// Upload size limit reached, close the JSON array and upload, requeue new event.
-	// The +1 is for the final closing bracket.
 	if int64(len(event)+e.bytesWritten+1) > e.uploadSizeLimitBytes {
 		if err := e.upload(ctx); err != nil {
 			return err
@@ -202,10 +192,7 @@ func (e *eventBuffer) upload(ctx context.Context) error {
 		return err
 	}
 
-	// reset upload buffer
-	e.bytesWritten = 0
-	e.uploadBuffer = new(bytes.Buffer)
-	e.writer = gzip.NewWriter(e.uploadBuffer)
+	e.newUploadBuffer()
 
 	return nil
 }

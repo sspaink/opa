@@ -875,6 +875,11 @@ func (p *Plugin) loop() {
 func (p *Plugin) doOneShot(ctx context.Context) error {
 	uploaded, err := p.oneShot(ctx)
 
+	if p.eventBufferEnabled {
+		// Start the next upload loop to prepare the next upload
+		go p.eventBuffer.Upload(ctx, p.manager.Client(p.config.Service), *p.config.Reporting.UploadSizeLimitBytes, *p.config.Resource)
+	}
+
 	// Make a local copy of the plugin's status.
 	p.statusMtx.Lock()
 	p.status.SetError(err)
@@ -897,12 +902,12 @@ func (p *Plugin) doOneShot(ctx context.Context) error {
 
 func (p *Plugin) oneShot(ctx context.Context) (ok bool, err error) {
 	if p.eventBufferEnabled {
+		// Wait for current upload loop to finish
 		done := make(chan struct{})
 		p.eventBuffer.Stop <- done
 		<-done
 
-		go p.eventBuffer.Upload(ctx, p.manager.Client(p.config.Service), *p.config.Reporting.UploadSizeLimitBytes, *p.config.Resource)
-
+		// Report latest error from the previous upload
 		select {
 		case err := <-p.eventBuffer.Error:
 			return false, err
@@ -989,7 +994,7 @@ func (p *Plugin) encodeAndBufferEvent(event EventV1) {
 	if p.eventBufferEnabled {
 		err := p.eventBuffer.Push(event, *p.config.Reporting.UploadSizeLimitBytes)
 		if err != nil {
-			if errors.As(err, &droppedNDCacheError{}) {
+			if errors.As(err, &droppedNDCache{}) {
 				p.addMetric(logNDBDropCounterName)
 			} else {
 				p.addMetric(logEncodingFailureCounterName)
@@ -1025,7 +1030,7 @@ func (p *Plugin) encodeAndBufferEvent(event EventV1) {
 		}
 
 		// Re-encoding was successful, but we still need to alert users.
-		p.logger.Error(droppedNDCacheError{}.Error())
+		p.logger.Error(droppedNDCache{}.Error())
 		p.addMetric(logNDBDropCounterName)
 	}
 
