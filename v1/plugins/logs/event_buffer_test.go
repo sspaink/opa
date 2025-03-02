@@ -43,7 +43,7 @@ func TestEventBuffer_Push(t *testing.T) {
 	}
 
 	err = e.Push(newTestEvent(t, "5", true), 195)
-	expectedErrorMsg = droppedNDCacheError{}.Error()
+	expectedErrorMsg = droppedNDCache{}.Error()
 	if err == nil {
 		t.Fatal("error expected")
 	} else if err.Error() != expectedErrorMsg {
@@ -191,7 +191,7 @@ func TestEventBuffer_Upload(t *testing.T) {
 	}
 }
 
-func newTestEvent(t *testing.T, ID string, enableNDCache bool) EventV1 {
+func newTestEvent(t *testing.T, id string, enableNDCache bool) EventV1 {
 	var result interface{} = false
 	var expInput interface{} = map[string]interface{}{"method": "GET"}
 	timestamp, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
@@ -203,7 +203,7 @@ func newTestEvent(t *testing.T, ID string, enableNDCache bool) EventV1 {
 			"id":  "test-instance-id",
 			"app": "example-app",
 		},
-		DecisionID:  ID,
+		DecisionID:  id,
 		Path:        "foo/bar",
 		Input:       &expInput,
 		Result:      &result,

@@ -16,7 +16,7 @@ flowchart LR
     3["Producer 3"] -. event .-> id2
     subgraph log [Log Plugin]
         id2 --> package
-        subgraph package [Upload Buffer]
+        subgraph package [JSON Array]
             A["[event, event, event, event]"]
         end
     end

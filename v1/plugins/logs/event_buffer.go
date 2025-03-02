@@ -19,17 +19,26 @@ type eventBuffer struct {
 	client               rest.Client   // client is used to upload the data to the configured service
 	uploadPath           string        // uploadPath is the user configured HTTP resource path the client will upload to
 	uploadSizeLimitBytes int64         // uploadSizeLimitBytes will enforce a maximum payload size to be uploaded
-	uploadBuffer         *bytes.Buffer // uploadBuffer is the temporary buffer to construct the JSON array used in between uploads
+	jsonArray            *bytes.Buffer // jsonArray is the temporary buffer to construct the JSON array used in between uploads
 	writer               *gzip.Writer  // writer writes to the uploadBuffer
 	bytesWritten         int           // bytesWritten is used to enforce the limit defined by uploadSizeLimitBytes
 }
 
 func newEventBuffer(limit int64) *eventBuffer {
-	return &eventBuffer{
+	e := &eventBuffer{
 		buffer: make(chan []byte, limit),
 		Stop:   make(chan chan struct{}),
 		Error:  make(chan error, 1),
 	}
+	e.newJSONArray()
+
+	return e
+}
+
+func (e *eventBuffer) newJSONArray() {
+	e.bytesWritten = 0
+	e.jsonArray = new(bytes.Buffer)
+	e.writer = gzip.NewWriter(e.jsonArray)
 }
 
 type droppedNDCache struct {
@@ -43,7 +52,7 @@ func (d droppedNDCache) Error() string {
 func (e *eventBuffer) Push(event EventV1, uploadSizeLimitBytes int64) error {
 	var err error
 	result, err := json.Marshal(event)
-	if err != nil {
+	if len(result) == 0 || err != nil {
 		return err
 	}
 
@@ -83,20 +92,12 @@ func push[T any](ch chan T, data T) {
 	}
 }
 
-func (e *eventBuffer) newUploadBuffer() {
-	e.bytesWritten = 0
-	e.uploadBuffer = new(bytes.Buffer)
-	e.writer = gzip.NewWriter(e.uploadBuffer)
-}
-
 // Upload reads events from the buffer to create a gzip compressed JSON array of events to upload to a service
 func (e *eventBuffer) Upload(ctx context.Context, client rest.Client, uploadSizeLimitBytes int64, uploadPath string) {
 	// These values can be reconfigured by the user therefore need to be reset each upload
 	e.client = client
 	e.uploadPath = uploadPath
 	e.uploadSizeLimitBytes = uploadSizeLimitBytes
-
-	e.newUploadBuffer()
 
 	for {
 		select {
@@ -110,10 +111,8 @@ func (e *eventBuffer) Upload(ctx context.Context, client rest.Client, uploadSize
 				e.pushError(err)
 			}
 
-			if e.bytesWritten != 0 {
-				if err := e.upload(ctx); err != nil {
-					e.pushError(err)
-				}
+			if err := e.upload(ctx); err != nil {
+				e.pushError(err)
 			}
 
 			done <- struct{}{}
@@ -122,34 +121,14 @@ func (e *eventBuffer) Upload(ctx context.Context, client rest.Client, uploadSize
 	}
 }
 
-// flush will attempt to upload the requested amount of events from the buffer
-func (e *eventBuffer) flush(ctx context.Context, len int) error {
-	for range len {
-		select {
-		case event := <-e.buffer:
-			if err := e.processEvent(ctx, event); err != nil {
-				return err
-			}
-		default:
-			return nil
-		}
-	}
-
-	return nil
-}
-
+// processEvent writes an event to the upload buffer
 func (e *eventBuffer) processEvent(ctx context.Context, event []byte) error {
-	if len(event) == 0 {
-		return nil
-	}
-
 	if int64(len(event)+e.bytesWritten+1) > e.uploadSizeLimitBytes {
 		if err := e.upload(ctx); err != nil {
 			return err
 		}
-		// Requeue the event that exceeded the upload size limit
-		push(e.buffer, event)
-		return nil
+		// Add overflowed event to the next upload
+		return e.processEvent(ctx, event)
 	}
 
 	switch e.bytesWritten {
@@ -177,8 +156,28 @@ func (e *eventBuffer) processEvent(ctx context.Context, event []byte) error {
 	return nil
 }
 
+// flush will attempt to upload the requested amount of events from the buffer
+func (e *eventBuffer) flush(ctx context.Context, len int) error {
+	for range len {
+		select {
+		case event := <-e.buffer:
+			if err := e.processEvent(ctx, event); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+
+	return nil
+}
+
 // upload closes the JSON array and attempts to send the data to the configured service
 func (e *eventBuffer) upload(ctx context.Context) error {
+	if e.bytesWritten == 0 {
+		return nil
+	}
+
 	_, err := e.writer.Write([]byte(`]`))
 	if err != nil {
 		return err
@@ -188,11 +187,11 @@ func (e *eventBuffer) upload(ctx context.Context) error {
 		return err
 	}
 
-	if err := uploadChunk(ctx, e.client, e.uploadPath, e.uploadBuffer.Bytes()); err != nil {
+	if err := uploadChunk(ctx, e.client, e.uploadPath, e.jsonArray.Bytes()); err != nil {
 		return err
 	}
 
-	e.newUploadBuffer()
+	e.newJSONArray()
 
 	return nil
 }
