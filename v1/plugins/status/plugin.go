@@ -8,7 +8,6 @@ package status
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -212,8 +211,8 @@ func New(parsedConfig *Config, manager *plugins.Manager) *Plugin {
 	p := &Plugin{
 		manager:        manager,
 		config:         *parsedConfig,
-		bundleCh:       make(chan bundle.Status, statusBufferLimit),
-		bulkBundleCh:   make(chan map[string]*bundle.Status, statusBufferLimit),
+		bundleCh:       make(chan bundle.Status),
+		bulkBundleCh:   make(chan map[string]*bundle.Status),
 		discoCh:        make(chan bundle.Status),
 		decisionLogsCh: make(chan lstat.Status),
 		stop:           make(chan chan struct{}),
@@ -283,12 +282,12 @@ func (p *Plugin) Stop(_ context.Context) {
 // UpdateBundleStatus notifies the plugin that the policy bundle was updated.
 // Deprecated: Use BulkUpdateBundleStatus instead.
 func (p *Plugin) UpdateBundleStatus(status bundle.Status) {
-	util.PushFIFO(p.bundleCh, status, p.metrics, statusBufferDropCounterName)
+	p.bundleCh <- status
 }
 
 // BulkUpdateBundleStatus notifies the plugin that the policy bundle was updated.
 func (p *Plugin) BulkUpdateBundleStatus(status map[string]*bundle.Status) {
-	util.PushFIFO(p.bulkBundleCh, status, p.metrics, statusBufferDropCounterName)
+	p.bulkBundleCh <- status
 }
 
 // UpdateDiscoveryStatus notifies the plugin that the discovery bundle was updated.
@@ -428,28 +427,34 @@ func (p *Plugin) oneShot(ctx context.Context) error {
 		p.updatePrometheusMetrics(req)
 	}
 
-	if p.config.Plugin != nil {
-		proxy, ok := p.manager.Plugin(*p.config.Plugin).(Logger)
-		if !ok {
-			return errors.New("plugin does not implement Logger interface")
-		}
-		return proxy.Log(ctx, req)
-	}
-
-	if p.config.Service != "" {
-		resp, err := p.manager.Client(p.config.Service).
-			WithJSON(req).
-			Do(ctx, "POST", fmt.Sprintf("/status/%v", p.config.PartitionName))
-		if err != nil {
-			return fmt.Errorf("status update failed: %w", err)
+	go func() {
+		if p.config.Plugin != nil {
+			proxy, ok := p.manager.Plugin(*p.config.Plugin).(Logger)
+			if !ok {
+				p.logger.Error("plugin does not implement Logger interface")
+			}
+			err := proxy.Log(ctx, req)
+			if err != nil {
+				p.logger.Error("%v", err)
+			}
 		}
 
-		defer util.Close(resp)
+		if p.config.Service != "" {
+			resp, err := p.manager.Client(p.config.Service).
+				WithJSON(req).
+				Do(ctx, "POST", fmt.Sprintf("/status/%v", p.config.PartitionName))
+			if err != nil {
+				p.logger.Error("status update failed: %w", err)
+			}
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("status update failed, server replied with HTTP %v %v", resp.StatusCode, http.StatusText(resp.StatusCode))
+			defer util.Close(resp)
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				p.logger.Error("status update failed, server replied with HTTP %v %v", resp.StatusCode, http.StatusText(resp.StatusCode))
+			}
 		}
-	}
+	}()
+
 	return nil
 }
 
