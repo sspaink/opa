@@ -20,6 +20,7 @@ jobs:
         with:
           args: --exclude-path vendor --accept 200..=206,403
           fail: false
+          workingDirectory: .
 
       - name: Create Issue From File
         if: steps.lychee.outputs.exit_code != 0
