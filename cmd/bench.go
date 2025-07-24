@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/olekukonko/tablewriter/tw"
 	"io"
 	"math"
 	"net/http"
@@ -624,9 +625,22 @@ func renderBenchmarkResult(params benchmarkCommandParams, br testing.BenchmarkRe
 			data = append(data, []string{k, prettyFormatFloat(br.Extra[k])})
 		}
 
-		table := tablewriter.NewWriter(w)
-		table.AppendBulk(data)
-		table.Render()
+		table := tablewriter.NewTable(w,
+			tablewriter.WithRendition(tw.Rendition{
+				Symbols: tw.NewSymbols(tw.StyleASCII),
+			}),
+			tablewriter.WithHeaderAutoFormat(tw.Off),
+			tablewriter.WithAlignment([]tw.Align{
+				tw.AlignLeft, tw.AlignRight,
+			}),
+		)
+
+		if err := table.Bulk(data); err != nil {
+			return
+		}
+		if err := table.Render(); err != nil {
+			return
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/cover"
@@ -83,14 +84,22 @@ func (o DepAnalysisOutput) Pretty(w io.Writer) error {
 		return nil
 	}
 
-	table := tablewriter.NewWriter(w)
-	table.SetHeader(headers)
-	table.SetAutoWrapText(false)
+	table := tablewriter.NewTable(w,
+		tablewriter.WithRowAutoWrap(tw.WrapNormal),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+		}),
+	)
+	table.Header(headers)
 	for i := range rows {
-		table.Append(rows[i])
+		if err := table.Append(rows[i]); err != nil {
+			return err
+		}
 	}
 
-	table.Render()
+	if err := table.Render(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -138,46 +147,52 @@ func NewOutputErrors(err error) []OutputError {
 	if err != nil {
 		// Handle known structured errors
 
-		switch typedErr := err.(type) {
-		case *ast.Error:
+		var a *ast.Error
+		var t *topdown.Error
+		var s *storage.Error
+		var a2 ast.Errors
+		var r rego.Errors
+		var l loader.Errors
+		switch {
+		case errors.As(err, &a):
 			errs = []OutputError{{
-				Code:     typedErr.Code,
-				Message:  typedErr.Message,
-				Details:  typedErr.Details,
-				Location: typedErr.Location,
-				err:      typedErr,
+				Code:     a.Code,
+				Message:  a.Message,
+				Details:  a.Details,
+				Location: a.Location,
+				err:      a,
 			}}
 
-		case *topdown.Error:
+		case errors.As(err, &t):
 			errs = []OutputError{{
-				Code:     typedErr.Code,
-				Message:  typedErr.Message,
-				Location: typedErr.Location,
-				err:      typedErr,
+				Code:     t.Code,
+				Message:  t.Message,
+				Location: t.Location,
+				err:      t,
 			}}
-		case *storage.Error:
+		case errors.As(err, &s):
 			errs = []OutputError{{
-				Code:    typedErr.Code,
-				Message: typedErr.Message,
-				err:     typedErr,
+				Code:    s.Code,
+				Message: s.Message,
+				err:     s,
 			}}
 
 		// The cases below are wrappers for other errors, format errors
 		// recursively on them.
-		case ast.Errors:
-			for _, e := range typedErr {
+		case errors.As(err, &a2):
+			for _, e := range a2 {
 				if e != nil {
 					errs = append(errs, NewOutputErrors(e)...)
 				}
 			}
-		case rego.Errors:
-			for _, e := range typedErr {
+		case errors.As(err, &r):
+			for _, e := range r {
 				if e != nil {
 					errs = append(errs, NewOutputErrors(e)...)
 				}
 			}
-		case loader.Errors:
-			for _, e := range typedErr {
+		case errors.As(err, &l):
+			for _, e := range l {
 				if e != nil {
 					errs = append(errs, NewOutputErrors(e)...)
 				}
@@ -187,7 +202,7 @@ func NewOutputErrors(err error) []OutputError {
 			// are converted to their string representation only.
 			errs = []OutputError{{
 				Message: err.Error(),
-				err:     typedErr,
+				err:     err,
 			}}
 			if d, ok := err.(rego.ErrorDetails); ok {
 				details := strings.Join(d.Lines(), "\n")
@@ -303,7 +318,9 @@ func PrettyWithOptions(w io.Writer, r Output, opts PrettyOptions) error {
 			return err
 		}
 	} else if r.undefined() {
-		fmt.Fprintln(w, "undefined")
+		if _, err := fmt.Fprintln(w, "undefined"); err != nil {
+			return err
+		}
 	} else if r.Result != nil {
 		if err := prettyResult(w, r.Result, r.limit); err != nil {
 			return err
@@ -350,21 +367,30 @@ func Source(w io.Writer, r Output) error {
 	}
 
 	for i := range r.Partial.Queries {
-		fmt.Fprintf(w, "# Query %d\n", i+1)
+		if _, err := fmt.Fprintf(w, "# Query %d\n", i+1); err != nil {
+			return err
+		}
 		bs, err := format.AstWithOpts(r.Partial.Queries[i], format.Opts{IgnoreLocations: true})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(w, string(bs))
+		if _, err := fmt.Fprintln(w, string(bs)); err != nil {
+			return err
+		}
 	}
 
 	for i := range r.Partial.Support {
-		fmt.Fprintf(w, "# Module %d\n", i+1)
+		if _, err := fmt.Fprintf(w, "# Module %d\n", i+1); err != nil {
+			return err
+		}
 		bs, err := format.AstWithOpts(r.Partial.Support[i], format.Opts{IgnoreLocations: true, RegoVersion: r.Partial.Support[i].RegoVersion()})
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(w, string(bs))
+
+		if _, err := fmt.Fprint(w, string(bs)); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -382,20 +408,28 @@ func Raw(w io.Writer, r Output) error {
 	for _, rs := range r.Result {
 		for i, expr := range rs.Expressions {
 			if str, ok := expr.Value.(string); ok {
-				fmt.Fprint(w, str)
+				if _, err := fmt.Fprint(w, str); err != nil {
+					return err
+				}
 			} else {
 				bytes, err := json.Marshal(expr.Value)
 				if err != nil {
 					return err
 				}
 
-				fmt.Fprint(w, string(bytes))
+				if _, err := fmt.Fprint(w, string(bytes)); err != nil {
+					return err
+				}
 			}
 
 			if i+1 >= len(rs.Expressions) {
-				fmt.Fprintln(w, "")
+				if _, err := fmt.Fprintln(w, ""); err != nil {
+					return err
+				}
 			} else {
-				fmt.Fprint(w, " ")
+				if _, err := fmt.Fprint(w, " "); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -440,72 +474,59 @@ func prettyResult(w io.Writer, rs rego.ResultSet, limit int) error {
 
 	keys := generateResultKeys(rs)
 	tableBindings := generateTableBindings(w, keys, rs, limit)
-	if tableBindings.NumLines() > 0 {
-		tableBindings.Render()
-	}
 
-	return nil
+	return tableBindings.Render()
 }
 
 func prettyPartial(w io.Writer, pq *rego.PartialQueries) error {
 
-	table := tablewriter.NewWriter(w)
-	table.SetRowLine(true)
-	table.SetAutoWrapText(false)
-	var maxWidth int
+	table := tablewriter.NewTable(w,
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+		tablewriter.WithRendition(tw.Rendition{Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.On}}}),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+		}),
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+	)
 
 	for i := range pq.Queries {
-		f, width, err := prettyASTNode(pq.Queries[i], ast.DefaultRegoVersion)
+		f, err := prettyASTNode(pq.Queries[i], ast.DefaultRegoVersion)
 		if err != nil {
 			return err
 		}
-		if width > maxWidth {
-			maxWidth = width
+
+		if err := table.Append([]string{fmt.Sprintf("Query %d", i+1), f}); err != nil {
+			return err
 		}
-		table.Append([]string{fmt.Sprintf("Query %d", i+1), f})
 	}
 
 	for i, s := range pq.Support {
-		f, width, err := prettyASTNode(s, s.RegoVersion())
+		f, err := prettyASTNode(s, s.RegoVersion())
 		if err != nil {
 			return err
 		}
-		if width > maxWidth {
-			maxWidth = width
+		if err := table.Append([]string{fmt.Sprintf("Support %d", i+1), f}); err != nil {
+			return err
 		}
-		table.Append([]string{fmt.Sprintf("Support %d", i+1), f})
 	}
 
-	table.SetColMinWidth(1, maxWidth)
-	table.Render()
-
-	return nil
+	return table.Render()
 }
 
 // prettyASTNode is used for pretty-printing the result of partial eval
-func prettyASTNode(x any, regoVersion ast.RegoVersion) (string, int, error) {
+func prettyASTNode(x any, regoVersion ast.RegoVersion) (string, error) {
 	bs, err := format.AstWithOpts(x, format.Opts{IgnoreLocations: true, RegoVersion: regoVersion})
 	if err != nil {
-		return "", 0, fmt.Errorf("format error: %w", err)
+		return "", fmt.Errorf("format error: %w", err)
 	}
-	var maxLineWidth int
 	s := strings.Trim(strings.ReplaceAll(string(bs), "\t", "  "), "\n")
-	for _, line := range strings.Split(s, "\n") {
-		width := tablewriter.DisplayWidth(line)
-		if width > maxLineWidth {
-			maxLineWidth = width
-		}
-	}
-	return s, maxLineWidth, nil
+	return s, nil
 }
 
 func prettyMetrics(w io.Writer, m metrics.Metrics, limit int) error {
 	tableMetrics := generateTableMetrics(w)
 	populateTableMetrics(m, tableMetrics, limit)
-	if tableMetrics.NumLines() > 0 {
-		tableMetrics.Render()
-	}
-	return nil
+	return tableMetrics.Render()
 }
 
 var statKeys = []string{"min", "max", "mean", "90%", "99%"}
@@ -514,17 +535,14 @@ func prettyAggregatedMetrics(w io.Writer, ms map[string]any, limit int) error {
 	keys := []string{"metric"}
 	tableMetrics := generateTableWithKeys(w, append(keys, statKeys...)...)
 	populateTableAggregatedMetrics(ms, tableMetrics, limit)
-	if tableMetrics.NumLines() > 0 {
-		tableMetrics.Render()
-	}
-	return nil
+	return tableMetrics.Render()
 }
 
 func prettyProfile(w io.Writer, profile []profiler.ExprStats) error {
 	tableProfile := generateTableProfile(w)
 
 	for _, rs := range profile {
-		line := []string{}
+		var line []string
 		timeNs := time.Duration(rs.ExprTimeNs) * time.Nanosecond
 		timeNsStr := timeNs.String()
 		numEval := strconv.FormatInt(int64(rs.NumEval), 10)
@@ -532,18 +550,19 @@ func prettyProfile(w io.Writer, profile []profiler.ExprStats) error {
 		numGenExpr := strconv.FormatInt(int64(rs.NumGenExpr), 10)
 		loc := rs.Location.String()
 		line = append(line, timeNsStr, numEval, numRedo, numGenExpr, loc)
-		tableProfile.Append(line)
+
+		if err := tableProfile.Append(line); err != nil {
+			return err
+		}
 	}
-	if tableProfile.NumLines() > 0 {
-		tableProfile.Render()
-	}
-	return nil
+
+	return tableProfile.Render()
 }
 
 func prettyAggregatedProfile(w io.Writer, profile []profiler.ExprStatsAggregated) error {
 	tableProfile := generateTableWithKeys(w, append(statKeys, "num eval", "num redo", "num gen expr", "location")...)
 	for _, rs := range profile {
-		line := []string{}
+		var line []string
 		for _, k := range statKeys {
 			v := rs.ExprTimeNsStats.(map[string]any)[k]
 			if f, ok := v.(float64); ok {
@@ -557,12 +576,13 @@ func prettyAggregatedProfile(w io.Writer, profile []profiler.ExprStatsAggregated
 		numGenExpr := strconv.FormatInt(int64(rs.NumGenExpr), 10)
 		loc := rs.Location.String()
 		line = append(line, numEval, numRedo, numGenExpr, loc)
-		tableProfile.Append(line)
+
+		if err := tableProfile.Append(line); err != nil {
+			return err
+		}
 	}
-	if tableProfile.NumLines() > 0 {
-		tableProfile.Render()
-	}
-	return nil
+
+	return tableProfile.Render()
 }
 
 func prettyExplanation(w io.Writer, explanation []*topdown.Event, opts topdown.PrettyTraceOptions) error {
@@ -572,8 +592,14 @@ func prettyExplanation(w io.Writer, explanation []*topdown.Event, opts topdown.P
 
 func prettyCoverage(w io.Writer, report *cover.Report) error {
 	table := tablewriter.NewWriter(w)
-	table.Append([]string{"Overall Coverage", fmt.Sprintf("%.02f", report.Coverage)})
-	table.Render()
+
+	if err := table.Append([]string{"Overall Coverage", fmt.Sprintf("%.02f", report.Coverage)}); err != nil {
+		return err
+	}
+
+	if err := table.Render(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -586,19 +612,30 @@ func checkStrLimit(input string, limit int) string {
 }
 
 func generateTableBindings(writer io.Writer, keys []resultKey, rs rego.ResultSet, prettyLimit int) *tablewriter.Table {
-	table := tablewriter.NewWriter(writer)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAutoFormatHeaders(false)
+	cfg := tablewriter.Config{
+		Header: tw.CellConfig{
+			Alignment: tw.CellAlignment{
+				Global: tw.AlignCenter,
+			},
+		},
+		Row: tw.CellConfig{
+			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+		},
+	}
+
+	table := tablewriter.NewTable(writer,
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+		tablewriter.WithConfig(cfg),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+		}),
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+	)
 	header := make([]string, len(keys))
 	for i := range header {
 		header[i] = keys[i].string()
 	}
-	table.SetHeader(header)
-	alignment := make([]int, len(keys))
-	for i := range header {
-		alignment[i] = tablewriter.ALIGN_LEFT
-	}
-	table.SetColumnAlignment(alignment)
+	table.Header(header)
 
 	for _, row := range rs {
 		printPrettyRow(table, keys, row, prettyLimit)
@@ -607,7 +644,7 @@ func generateTableBindings(writer io.Writer, keys []resultKey, rs rego.ResultSet
 }
 
 func printPrettyRow(table *tablewriter.Table, keys []resultKey, result rego.Result, prettyLimit int) {
-	buf := []string{}
+	var buf []string
 	for _, k := range keys {
 		v := k.selectVarValue(result)
 		js, err := json.Marshal(v)
@@ -618,7 +655,10 @@ func printPrettyRow(table *tablewriter.Table, keys []resultKey, result rego.Resu
 			buf = append(buf, s)
 		}
 	}
-	table.Append(buf)
+
+	if err := table.Append(buf); err != nil {
+		return
+	}
 }
 
 func generateTableMetrics(writer io.Writer) *tablewriter.Table {
@@ -626,16 +666,28 @@ func generateTableMetrics(writer io.Writer) *tablewriter.Table {
 }
 
 func generateTableWithKeys(writer io.Writer, keys ...string) *tablewriter.Table {
-	table := tablewriter.NewWriter(writer)
-	aligns := make([]int, 0, len(keys))
 	hdrs := make([]string, 0, len(keys))
 	for _, k := range keys {
 		hdrs = append(hdrs, strings.Title(k)) //nolint:staticcheck // SA1019, no unicode here
-		aligns = append(aligns, tablewriter.ALIGN_LEFT)
 	}
-	table.SetHeader(hdrs)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetColumnAlignment(aligns)
+
+	cfg := tablewriter.Config{
+		Header: tw.CellConfig{
+			Alignment: tw.CellAlignment{
+				Global: tw.AlignLeft,
+			},
+		},
+	}
+
+	table := tablewriter.NewTable(writer,
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithConfig(cfg),
+		tablewriter.WithRendition(tw.Rendition{
+			Symbols: tw.NewSymbols(tw.StyleASCII),
+		}),
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+	)
+	table.Header(hdrs)
 	return table
 }
 
@@ -644,17 +696,17 @@ func generateTableProfile(writer io.Writer) *tablewriter.Table {
 }
 
 func populateTableMetrics(m metrics.Metrics, table *tablewriter.Table, prettyLimit int) {
-	lines := [][]string{}
+	var lines [][]string
 	for varName, varValueInterface := range m.All() {
 		val, ok := varValueInterface.(map[string]any)
 		if !ok {
-			line := []string{}
+			var line []string
 			varValue := checkStrLimit(fmt.Sprintf("%v", varValueInterface), prettyLimit)
 			line = append(line, varName, varValue)
 			lines = append(lines, line)
 		} else {
 			for k, v := range val {
-				line := []string{}
+				var line []string
 				newVarName := fmt.Sprintf("%v_%v", varName, k)
 				value := checkStrLimit(fmt.Sprintf("%v", v), prettyLimit)
 				line = append(line, newVarName, value)
@@ -663,11 +715,13 @@ func populateTableMetrics(m metrics.Metrics, table *tablewriter.Table, prettyLim
 		}
 	}
 	sortMetricRows(lines)
-	table.AppendBulk(lines)
+	if err := table.Bulk(lines); err != nil {
+		return
+	}
 }
 
 func populateTableAggregatedMetrics(ms map[string]any, table *tablewriter.Table, prettyLimit int) {
-	lines := [][]string{}
+	var lines [][]string
 	for name, vals := range ms {
 		line := []string{name}
 		vs := vals.(map[string]any)
@@ -677,7 +731,9 @@ func populateTableAggregatedMetrics(ms map[string]any, table *tablewriter.Table,
 		lines = append(lines, line)
 	}
 	sortMetricRows(lines)
-	table.AppendBulk(lines)
+	if err := table.Bulk(lines); err != nil {
+		return
+	}
 }
 
 func sortMetricRows(data [][]string) {
@@ -717,7 +773,7 @@ func (rk resultKey) selectVarValue(result rego.Result) any {
 }
 
 func generateResultKeys(rs rego.ResultSet) []resultKey {
-	keys := []resultKey{}
+	var keys []resultKey
 	if len(rs) != 0 {
 		for k := range rs[0].Bindings {
 			keys = append(keys, resultKey{

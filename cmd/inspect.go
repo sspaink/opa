@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/olekukonko/tablewriter/tw"
 	"io"
 	"os"
 	"sort"
@@ -211,20 +212,22 @@ func populateManifest(out io.Writer, m *bundle.Manifest) error {
 		lines = append(lines, []string{"Metadata", truncateTableStr(string(metadata))})
 	}
 
-	t.AppendBulk(lines)
-	if t.NumLines() > 0 {
-		fmt.Fprintln(out, "MANIFEST:")
-		t.Render()
+	if err := t.Bulk(lines); err != nil {
+		return err
 	}
 
-	return nil
+	if _, err := fmt.Fprintln(out, "MANIFEST:"); err != nil {
+		return err
+	}
+	return t.Render()
 }
 
 func populateNamespaces(out io.Writer, n map[string][]string) error {
 	t := generateTableWithKeys(out, "namespace", "file")
 	// only auto-merge the namespace column
-	t.SetAutoMergeCells(false)
-	t.SetAutoMergeCellsByColumnIndex([]int{0})
+	t.Options(
+		tablewriter.WithRowMergeMode(tw.MergeNone),
+	)
 	var lines [][]string
 
 	for _, k := range util.KeysSorted(n) {
@@ -233,13 +236,14 @@ func populateNamespaces(out io.Writer, n map[string][]string) error {
 		}
 	}
 
-	t.AppendBulk(lines)
-	if t.NumLines() > 0 {
-		fmt.Fprintln(out, "NAMESPACES:")
-		t.Render()
+	if err := t.Bulk(lines); err != nil {
+		return err
 	}
 
-	return nil
+	if _, err := fmt.Fprintln(out, "NAMESPACES:"); err != nil {
+		return err
+	}
+	return t.Render()
 }
 
 func populateAnnotations(out io.Writer, refs []*ast.AnnotationsRef) error {
@@ -385,19 +389,33 @@ func printTitle(out io.Writer, ref *ast.AnnotationsRef) {
 }
 
 func generateTableWithKeys(writer io.Writer, keys ...string) *tablewriter.Table {
-	table := tablewriter.NewWriter(writer)
-	aligns := []int{}
+	cfg := tablewriter.Config{
+		Header: tw.CellConfig{
+			Alignment: tw.CellAlignment{
+				Global: tw.AlignCenter,
+			},
+		},
+		Row: tw.CellConfig{
+			Alignment: tw.CellAlignment{Global: tw.AlignLeft},
+		},
+	}
+
+	table := tablewriter.NewTable(writer,
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAlignment(tw.AlignCenter),
+		tablewriter.WithRowMergeMode(tw.MergeHorizontal),
+		tablewriter.WithRendition(tw.Rendition{
+			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.On}},
+			Symbols:  tw.NewSymbols(tw.StyleASCII),
+		}),
+		tablewriter.WithConfig(cfg),
+	)
 	hdrs := make([]string, 0, len(keys))
 	for _, k := range keys {
 		hdrs = append(hdrs, strings.Title(k)) //nolint:staticcheck // SA1019, no unicode
-		aligns = append(aligns, tablewriter.ALIGN_LEFT)
 	}
-	table.SetHeader(hdrs)
-	table.SetAlignment(tablewriter.ALIGN_CENTER)
-	table.SetAutoMergeCells(true)
-	table.SetColumnAlignment(aligns)
-	table.SetRowLine(false)
-	table.SetAutoWrapText(false)
+	table.Header(hdrs)
+
 	return table
 }
 
