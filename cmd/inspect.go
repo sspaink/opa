@@ -225,7 +225,7 @@ func populateManifest(out io.Writer, m *bundle.Manifest) error {
 func populateNamespaces(out io.Writer, n map[string][]string) error {
 	t := generateTableWithKeys(out, "namespace", "file")
 	// only auto-merge the namespace column
-	t.Options(
+	t = t.Options(
 		tablewriter.WithRowMergeMode(tw.MergeNone),
 	)
 	var lines [][]string
@@ -405,7 +405,7 @@ func generateTableWithKeys(writer io.Writer, keys ...string) *tablewriter.Table 
 		tablewriter.WithRowAlignment(tw.AlignCenter),
 		tablewriter.WithRowMergeMode(tw.MergeHorizontal),
 		tablewriter.WithRendition(tw.Rendition{
-			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.On}},
+			Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.Off}},
 			Symbols:  tw.NewSymbols(tw.StyleASCII),
 		}),
 		tablewriter.WithConfig(cfg),

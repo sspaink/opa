@@ -480,6 +480,10 @@ func prettyResult(w io.Writer, rs rego.ResultSet, limit int) error {
 
 func prettyPartial(w io.Writer, pq *rego.PartialQueries) error {
 
+	cfg := tablewriter.Config{
+		Behavior: tw.Behavior{TrimSpace: tw.Off},
+	}
+
 	table := tablewriter.NewTable(w,
 		tablewriter.WithRowAutoWrap(tw.WrapNone),
 		tablewriter.WithRendition(tw.Rendition{Settings: tw.Settings{Separators: tw.Separators{BetweenRows: tw.On}}}),
@@ -487,6 +491,7 @@ func prettyPartial(w io.Writer, pq *rego.PartialQueries) error {
 			Symbols: tw.NewSymbols(tw.StyleASCII),
 		}),
 		tablewriter.WithHeaderAutoFormat(tw.Off),
+		tablewriter.WithConfig(cfg),
 	)
 
 	for i := range pq.Queries {
@@ -508,6 +513,8 @@ func prettyPartial(w io.Writer, pq *rego.PartialQueries) error {
 		if err := table.Append([]string{fmt.Sprintf("Support %d", i+1), f}); err != nil {
 			return err
 		}
+
+		table.Footer()
 	}
 
 	return table.Render()
