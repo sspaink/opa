@@ -2947,97 +2947,97 @@ p := [data() | data := 1]`,
 
 func TestCompilerCheckUnusedImports(t *testing.T) {
 	cases := []strictnessTestCase{
-		//{
-		//	note: "simple unused: input ref with same name",
-		//	module: `package p
-		//	import data.foo.bar as bar
-		//	r {
-		//		input.bar == 11
-		//	}
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.foo.bar as bar unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "unused import, but imported ref used",
-		//	module: `package p
-		//	import data.foo # unused
-		//	r { data.foo == 10 }
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.foo unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "one of two unused",
-		//	module: `package p
-		//	import data.foo
-		//	import data.x.power #unused
-		//	r { foo == 10 }
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 3, 4),
-		//			Message:  "import data.x.power unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "multiple unused: with input ref of same name",
-		//	module: `package p
-		//	import data.foo
-		//	import data.x.power
-		//	r { input.foo == 10 }
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.foo unused",
-		//		},
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 3, 4),
-		//			Message:  "import data.x.power unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "ignore unused rego import",
-		//	module: `package p
-		//	import rego.v1
-		//	r if { 10 == 10 }
-		//	`,
-		//},
-		//{
-		//	note: "import used in comparison",
-		//	module: `package p
-		//	import data.foo.x
-		//	r { x == 10 }
-		//	`,
-		//},
-		//{
-		//	note: "multiple used imports in one rule",
-		//	module: `package p
-		//	import data.foo.x
-		//	import data.power.ranger
-		//	r { ranger == x }
-		//	`,
-		//},
-		//{
-		//	note: "multiple used imports in separate rules",
-		//	module: `package p
-		//	import data.foo.x
-		//	import data.power.ranger
-		//	r { ranger == 23 }
-		//	t { x == 1 }
-		//	`,
-		//},
+		{
+			note: "simple unused: input ref with same name",
+			module: `package p
+			import data.foo.bar as bar
+			r {
+				input.bar == 11
+			}
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.foo.bar as bar unused",
+				},
+			},
+		},
+		{
+			note: "unused import, but imported ref used",
+			module: `package p
+			import data.foo # unused
+			r { data.foo == 10 }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.foo unused",
+				},
+			},
+		},
+		{
+			note: "one of two unused",
+			module: `package p
+			import data.foo
+			import data.x.power #unused
+			r { foo == 10 }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 3, 4),
+					Message:  "import data.x.power unused",
+				},
+			},
+		},
+		{
+			note: "multiple unused: with input ref of same name",
+			module: `package p
+			import data.foo
+			import data.x.power
+			r { input.foo == 10 }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.foo unused",
+				},
+				&Error{
+					Location: NewLocation([]byte("import"), "", 3, 4),
+					Message:  "import data.x.power unused",
+				},
+			},
+		},
+		{
+			note: "ignore unused rego import",
+			module: `package p
+			import rego.v1
+			r if { 10 == 10 }
+			`,
+		},
+		{
+			note: "import used in comparison",
+			module: `package p
+			import data.foo.x
+			r { x == 10 }
+			`,
+		},
+		{
+			note: "multiple used imports in one rule",
+			module: `package p
+			import data.foo.x
+			import data.power.ranger
+			r { ranger == x }
+			`,
+		},
+		{
+			note: "multiple used imports in separate rules",
+			module: `package p
+			import data.foo.x
+			import data.power.ranger
+			r { ranger == 23 }
+			t { x == 1 }
+			`,
+		},
 		{
 			note: "import used as function operand",
 			module: `package p
@@ -3045,113 +3045,113 @@ func TestCompilerCheckUnusedImports(t *testing.T) {
 			r = count(foo) > 1 # only one operand
 			`,
 		},
-		//{
-		//	note: "import used as function operand, compount term",
-		//	module: `package p
-		//	import data.foo
-		//	r = sprintf("%v %d", [foo, 0])
-		//	`,
-		//},
-		//{
-		//	note: "import used as plain term",
-		//	module: `package p
-		//	import data.foo
-		//	r {
-		//		foo
-		//	}
-		//	`,
-		//},
-		//{
-		//	note: "import used in 'every' domain",
-		//	module: `package p
-		//	import future.keywords.every
-		//	import data.foo
-		//	r {
-		//		every x in foo { x > 1 }
-		//	}
-		//	`,
-		//},
-		//{
-		//	note: "import used in 'every' body",
-		//	module: `package p
-		//	import future.keywords.every
-		//	import data.foo
-		//	r {
-		//		every x in [1,2,3] { x > foo }
-		//	}
-		//	`,
-		//},
-		//{
-		//	note: "future import kept even if unused",
-		//	module: `package p
-		//	import future.keywords
-		//
-		//	r { true }
-		//	`,
-		//},
-		//{
-		//	note: "shadowed var name in function arg",
-		//	module: `package p
-		//	import data.foo # unused
-		//
-		//	r { f(1) }
-		//	f(foo) = foo == 1
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.foo unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "shadowed assigned var name",
-		//	module: `package p
-		//	import data.foo # unused
-		//
-		//	r { foo := true; foo }
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.foo unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "used as rule value",
-		//	module: `package p
-		//	import data.bar # unused
-		//	import data.foo
-		//
-		//	r = foo { true }
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.bar unused",
-		//		},
-		//	},
-		//},
-		//{
-		//	note: "unused as rule value (but same data ref)",
-		//	module: `package p
-		//	import data.bar # unused
-		//	import data.foo # unused
-		//
-		//	r = data.foo { true }
-		//	`,
-		//	expectedErrors: Errors{
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 2, 4),
-		//			Message:  "import data.bar unused",
-		//		},
-		//		&Error{
-		//			Location: NewLocation([]byte("import"), "", 3, 4),
-		//			Message:  "import data.foo unused",
-		//		},
-		//	},
-		//},
+		{
+			note: "import used as function operand, compount term",
+			module: `package p
+			import data.foo
+			r = sprintf("%v %d", [foo, 0])
+			`,
+		},
+		{
+			note: "import used as plain term",
+			module: `package p
+			import data.foo
+			r {
+				foo
+			}
+			`,
+		},
+		{
+			note: "import used in 'every' domain",
+			module: `package p
+			import future.keywords.every
+			import data.foo
+			r {
+				every x in foo { x > 1 }
+			}
+			`,
+		},
+		{
+			note: "import used in 'every' body",
+			module: `package p
+			import future.keywords.every
+			import data.foo
+			r {
+				every x in [1,2,3] { x > foo }
+			}
+			`,
+		},
+		{
+			note: "future import kept even if unused",
+			module: `package p
+			import future.keywords
+
+			r { true }
+			`,
+		},
+		{
+			note: "shadowed var name in function arg",
+			module: `package p
+			import data.foo # unused
+
+			r { f(1) }
+			f(foo) = foo == 1
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.foo unused",
+				},
+			},
+		},
+		{
+			note: "shadowed assigned var name",
+			module: `package p
+			import data.foo # unused
+
+			r { foo := true; foo }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.foo unused",
+				},
+			},
+		},
+		{
+			note: "used as rule value",
+			module: `package p
+			import data.bar # unused
+			import data.foo
+
+			r = foo { true }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.bar unused",
+				},
+			},
+		},
+		{
+			note: "unused as rule value (but same data ref)",
+			module: `package p
+			import data.bar # unused
+			import data.foo # unused
+
+			r = data.foo { true }
+			`,
+			expectedErrors: Errors{
+				&Error{
+					Location: NewLocation([]byte("import"), "", 2, 4),
+					Message:  "import data.bar unused",
+				},
+				&Error{
+					Location: NewLocation([]byte("import"), "", 3, 4),
+					Message:  "import data.foo unused",
+				},
+			},
+		},
 	}
 
 	runStrictnessTestCase(t, cases, true)

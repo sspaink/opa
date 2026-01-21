@@ -27,10 +27,13 @@ func TestCheckInference(t *testing.T) {
 	builtinMap["fake_builtin_1"] = &Builtin{
 		Name: "fake_builtin_1",
 		Decl: types.NewFunction(
-			nil,
-			types.NewArray(
-				[]types.Type{types.S, types.S}, nil,
+			types.Args(
+				types.Named("collection", types.NewAny(
+					types.SetOfNum,
+					types.NewArray(nil, types.S),
+				)).Description("the set or array of numbers to multiply"),
 			),
+			nil,
 		),
 	}
 
@@ -38,13 +41,15 @@ func TestCheckInference(t *testing.T) {
 	builtinMap["fake_builtin_2"] = &Builtin{
 		Name: "fake_builtin_2",
 		Decl: types.NewFunction(
-			nil,
-			types.NewObject(
-				[]*types.StaticProperty{
-					{Key: "a", Value: types.S},
-					{Key: "b", Value: types.S},
-				}, nil,
+			types.Args(
+				types.NewObject(
+					[]*types.StaticProperty{
+						{Key: "a", Value: types.S},
+						{Key: "b", Value: types.S},
+					}, nil,
+				),
 			),
+			nil,
 		),
 	}
 
@@ -52,8 +57,10 @@ func TestCheckInference(t *testing.T) {
 	builtinMap["fake_builtin_3"] = &Builtin{
 		Name: "fake_builtin_3",
 		Decl: types.NewFunction(
+			types.Args(
+				types.NewSet(types.S),
+			),
 			nil,
-			types.NewSet(types.S),
 		),
 	}
 
@@ -240,13 +247,13 @@ func TestCheckInference(t *testing.T) {
 			Var("x"): types.N,
 			Var("y"): types.N,
 		}},
-		{"array-builtin", `x=1;fake_builtin_1([x,"foo"])`, map[Var]types.Type{
+		{"array-builtin", `x="foo";fake_builtin_1([x,"foo"])`, map[Var]types.Type{
 			Var("x"): types.S,
 		}},
-		{"object-builtin", `fake_builtin_2({"a": "foo", "b": x})`, map[Var]types.Type{
+		{"object-builtin", `x="foo";fake_builtin_2({"a": "foo", "b": x})`, map[Var]types.Type{
 			Var("x"): types.S,
 		}},
-		{"set-builtin", `fake_builtin_3({"foo", x})`, map[Var]types.Type{
+		{"set-builtin", `x="foo";fake_builtin_3({"foo", x})`, map[Var]types.Type{
 			Var("x"): types.S,
 		}},
 		{"array-comprehension-ref-closure", `a = [1,"foo",3]; x = [ i | a[_] = i ]`, map[Var]types.Type{
@@ -354,7 +361,7 @@ func TestCheckInferenceRules(t *testing.T) {
 		{`ref_rule_single`, `p.q.r { true }`},
 		{`ref_rule_single_with_number_key`, `p.q[3] { true }`},
 		{`ref_regression_array_key`,
-			`walker[[p, v]] = o { l = input; walk(l, k); [p, v] = k; o = {} }`},
+			`walker[[p, v]] = o { l = input; walk(l); [p, v] = k; o = {} }`},
 		{`overlap`, `p.q[r] = y { x = ["a", "b"]; y = x[r] }`},
 		{`overlap`, `p.q.r = false { true }`},
 		{`overlap`, `p.q.r = "false" { true }`},
@@ -521,7 +528,7 @@ func TestCheckInferenceRules(t *testing.T) {
 		{"ref_regression_array_key", ruleset2, "data.ref_regression_array_key.walker",
 			types.NewObject(
 				nil,
-				types.NewDynamicProperty(types.NewArray([]types.Type{types.NewArray(types.NewAny(), types.A), types.A}, nil),
+				types.NewDynamicProperty(types.NewArray([]types.Type{types.A, types.A}, nil),
 					types.NewObject(nil, types.NewDynamicProperty(types.A, types.A))),
 			)},
 		{
