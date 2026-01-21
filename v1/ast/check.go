@@ -412,6 +412,7 @@ func (tc *typeChecker) checkExprBuiltin(env *TypeEnv, expr *Expr) *Error {
 		operands = operands[:len(operands)-1]
 	}
 
+	// TODO handle nested functions! e.g. count(1) > 1
 	argTypes := getArgTypes(env, operands)
 	fArgs := ftpe.FuncArgs()
 	if len(argTypes) > len(fArgs.Args) && fArgs.Variadic == nil {
