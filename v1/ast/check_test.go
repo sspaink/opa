@@ -233,14 +233,14 @@ func TestCheckInference(t *testing.T) {
 			`, map[Var]types.Type{
 			Var("k"): types.NewAny(types.S, types.N),
 		}},
-		{"simple-built-in", "plus(1,2,x)", map[Var]types.Type{
+		{"simple-built-in", "x=1;plus(1,x)", map[Var]types.Type{
 			Var("x"): types.N,
 		}},
-		{"simple-built-in-exists", "plus(1,2,x); plus(x,2,y)", map[Var]types.Type{
+		{"simple-built-in-exists", "x=1;y=2;plus(1,x); plus(x,y)", map[Var]types.Type{
 			Var("x"): types.N,
 			Var("y"): types.N,
 		}},
-		{"array-builtin", `fake_builtin_1([x,"foo"])`, map[Var]types.Type{
+		{"array-builtin", `x=1;fake_builtin_1([x,"foo"])`, map[Var]types.Type{
 			Var("x"): types.S,
 		}},
 		{"object-builtin", `fake_builtin_2({"a": "foo", "b": x})`, map[Var]types.Type{
@@ -298,7 +298,7 @@ func TestCheckInference(t *testing.T) {
 				t.Fatalf("Unexpected error: %v", err)
 			}
 			for k, tpe := range tc.expected {
-				result := env.Get(k)
+				result := env.GetByValue(k)
 				if tpe == nil {
 					if result != nil {
 						t.Errorf("Expected %v type to be unset but got: %v", k, result)
@@ -982,6 +982,7 @@ func TestVariadicBuiltins(t *testing.T) {
 	env := newTypeChecker().Env(map[string]*Builtin{
 		"println": {
 			Name: "println",
+			// allow any number of arguments that are of any type
 			Decl: types.NewVariadicFunction([]types.Type{}, types.A, nil),
 		},
 	})
@@ -995,9 +996,15 @@ func TestVariadicBuiltins(t *testing.T) {
 	env = newTypeChecker().Env(map[string]*Builtin{
 		"println": {
 			Name: "println",
+			// must start with a number followed by any number of arguments of any type
 			Decl: types.NewVariadicFunction([]types.Type{types.N}, types.A, nil),
 		},
 	})
+
+	_, errs = newTypeChecker().CheckBody(env, MustParseBody(`println(7, "hello")`))
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
 
 	_, errs = newTypeChecker().CheckBody(env, MustParseBody(`println("hello", 7)`))
 	if len(errs) != 1 {
@@ -1014,9 +1021,15 @@ func TestVariadicBuiltins(t *testing.T) {
 	env = newTypeChecker().Env(map[string]*Builtin{
 		"println": {
 			Name: "println",
+			// must start with a number followed by any number of arguments that are numbers
 			Decl: types.NewVariadicFunction([]types.Type{types.N}, types.N, nil),
 		},
 	})
+
+	_, errs = newTypeChecker().CheckBody(env, MustParseBody(`println(7, 7)`))
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
 
 	_, errs = newTypeChecker().CheckBody(env, MustParseBody(`println(7, "world")`))
 	if len(errs) != 1 {
@@ -2622,6 +2635,65 @@ r := f()`,
 
 r := f()`,
 			expectedError: "rego_type_error: undefined function f",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			module, err := ParseModuleWithOpts("policy.rego", tc.policy, ParserOptions{ProcessAnnotation: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			modules := map[string]*Module{"policy.rego": module}
+
+			capabilities := CapabilitiesForThisVersion()
+			compiler := NewCompiler().
+				WithUseTypeCheckAnnotations(true).
+				WithCapabilities(capabilities)
+			compiler.Compile(modules)
+
+			if !compiler.Failed() {
+				t.Fatal("expected error, got none")
+			}
+
+			if !strings.Contains(compiler.Errors.Error(), tc.expectedError) {
+				t.Fatalf("expected error:\n\n%s\n\ngot:\n\n%s",
+					tc.expectedError, compiler.Errors.Error())
+			}
+		})
+	}
+}
+
+func TestCheckTypesFromReference(t *testing.T) {
+	tests := []struct {
+		name          string
+		policy        string
+		expectedError string
+	}{
+		{
+			name: "wrong type used directly",
+			policy: `package p
+
+s := sum([1, "foo"])`,
+			expectedError: "sum: invalid argument(s)",
+		},
+		{
+			name: "wrong type as reference",
+			policy: `package p
+
+a := "foo"
+s := sum([1, a])`,
+			expectedError: "sum: invalid argument(s)",
+		},
+		{
+			name: "wrong type as reference within rule",
+			policy: `package p
+
+allow := s if {
+    a := "foo"
+    s := sum([1, a])
+}`,
+			expectedError: "sum: invalid argument(s)",
 		},
 	}
 

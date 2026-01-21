@@ -400,31 +400,53 @@ func (tc *typeChecker) checkExprBuiltin(env *TypeEnv, expr *Expr) *Error {
 		return NewError(TypeErr, expr.Location, "undefined function %v", name)
 	}
 
-	fargs := ftpe.FuncArgs()
-	namedFargs := ftpe.NamedFuncArgs()
+	// expr.Operands() for a builtin function returns (e.g. sum([1,2]) )
+	// args[0] = the function name (e.g. sum)
+	// args[1..len(x)-2] = the arguments, each a separate entry (e.g. [1, 2])
+	// args[len(x)-1) = if the function was generated then the last value will be the function + arguments (e.g. sum(1, 2))
+	operands := expr.Operands()
 
-	if ftpe.Result() != nil {
-		fargs.Args = append(fargs.Args, ftpe.Result())
-		namedFargs.Args = append(namedFargs.Args, ftpe.NamedResult())
+	if expr.Generated {
+		// if the expression was generated then an added output is added (e.g. the function + arguments sum(1, 2))
+		// this extra output information isn't needed here, we only need the arguments passed to the function
+		operands = operands[:len(operands)-1]
 	}
 
-	args := expr.Operands()
-
-	if len(args) > len(fargs.Args) && fargs.Variadic == nil {
-		return newArgError(expr.Location, name, "too many arguments", getArgTypes(env, args), namedFargs)
+	argTypes := getArgTypes(env, operands)
+	fArgs := ftpe.FuncArgs()
+	if len(argTypes) > len(fArgs.Args) && fArgs.Variadic == nil {
+		return newArgError(expr.Location, name, "too many arguments", argTypes, ftpe.NamedFuncArgs())
 	}
 
-	if len(args) < len(ftpe.FuncArgs().Args) {
-		return newArgError(expr.Location, name, "too few arguments", getArgTypes(env, args), namedFargs)
+	if len(argTypes) < len(fArgs.Args) {
+		return newArgError(expr.Location, name, "too few arguments", argTypes, ftpe.NamedFuncArgs())
 	}
 
-	for i := range args {
-		if !unify1(env, args[i], fargs.Arg(i), false) {
-			post := make([]types.Type, len(args))
-			for i := range args {
-				post[i] = env.GetByValue(args[i].Value)
+	if fArgs.Variadic != nil {
+		// check if all required arguments match types
+		for i := range fArgs.Args {
+			if !unifies(argTypes[i], fArgs.Args[i]) {
+				return newArgError(expr.Location, name, "invalid argument(s)", argTypes, ftpe.NamedFuncArgs())
 			}
-			return newArgError(expr.Location, name, "invalid argument(s)", post, namedFargs)
+		}
+
+		// check to make sure the variadic type matches, unless it is any
+		if _, ok := fArgs.Variadic.(types.Any); !ok {
+			// looping over fArgs.Args will skip variadic function
+			for i := range argTypes {
+				if !unifies(argTypes[i], fArgs.Variadic) {
+					return newArgError(expr.Location, name, "invalid argument(s)", argTypes, ftpe.NamedFuncArgs())
+				}
+			}
+		}
+
+		return nil
+	}
+
+	// looping over fArgs.Args will skip variadic function
+	for i := range argTypes {
+		if !unifies(argTypes[i], fArgs.Args[i]) {
+			return newArgError(expr.Location, name, "invalid argument(s)", argTypes, ftpe.NamedFuncArgs())
 		}
 	}
 
@@ -614,6 +636,7 @@ func unify1(env *TypeEnv, term *Term, tpe types.Type, union bool) bool {
 			}
 			env.tree.PutOne(term.Value, tpe)
 		} else {
+			// This is used to infer the type of v
 			env.tree.PutOne(term.Value, types.Or(env.GetByValue(v), tpe))
 		}
 		return true
@@ -1159,7 +1182,7 @@ func removeDuplicate(list []Value) []Value {
 func getArgTypes(env *TypeEnv, args []*Term) []types.Type {
 	pre := make([]types.Type, len(args))
 	for i := range args {
-		pre[i] = env.Get(args[i])
+		pre[i] = env.GetByValue(args[i].Value)
 	}
 	return pre
 }
