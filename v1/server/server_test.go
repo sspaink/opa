@@ -1181,6 +1181,59 @@ func TestCompileV1(t *testing.T) {
 	}
 }
 
+func TestCompileRecursionIssue(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	test.WithTempFS(nil, func(root string) {
+		disk, err := disk.New(ctx, logging.NewNoOpLogger(), nil, disk.Options{Dir: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer disk.Close(ctx)
+		f := newFixtureWithStore(t, disk)
+
+		err = f.v1(http.MethodPut, "/policies/test", `package test
+
+default allow := false
+
+allow if {
+	bt = {tag | tag := input.book.tags[_]}
+	ut = {tag | tag := input.user.tags[_]}
+	bt & ut == bt
+}`, 200, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		compileReq := newReqV1(http.MethodPost, "/compile", `{"query":"data.test.allow == true","input":{"user":{"tags":["1","3","3"]},"book":{"tags":["1","3"]}},"unknowns":["input.book"]}`)
+
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, compileReq)
+
+		var response types.CompileResponseV1
+		if err := json.NewDecoder(f.recorder.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+
+		if len(response.Explanation) == 0 {
+			t.Fatal("Expected non-empty explanation")
+		}
+
+		assertMetricsExist(t, response.Metrics, []string{
+			"timer_rego_partial_eval_ns",
+			"timer_rego_query_compile_ns",
+			"timer_rego_query_parse_ns",
+			"timer_server_handler_ns",
+			"counter_disk_read_keys",
+			"timer_disk_read_ns",
+		})
+	})
+
+}
+
 func TestCompileV1Observability(t *testing.T) {
 	t.Parallel()
 
