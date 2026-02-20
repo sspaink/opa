@@ -262,6 +262,21 @@ func (bindingPlugTransform) plugBindingsVar(pctx *plugContext, v ast.Var) ast.Va
 		return result
 	}
 
+	// Make a deep copy of b otherwise the terms can get transformed corrupting the removedEqs
+	if c, ok := b.(ast.Call); ok {
+		duplicate := make(ast.Call, len(c))
+
+		for i, original := range c {
+			if original == nil {
+				continue
+			}
+
+			duplicate[i] = original.Copy()
+		}
+
+		return duplicate
+	}
+
 	return b
 }
 

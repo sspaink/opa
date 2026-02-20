@@ -278,6 +278,12 @@ func Transform(t Transformer, x any) (any, error) {
 		return y, nil
 	case Call:
 		for i := range y {
+			// Check if the call is referencing itself
+			if x1, ok := x.(Value); ok {
+				if y[i].Value.Compare(x1) == 0 {
+					continue
+				}
+			}
 			if y[i], err = transformTerm(t, y[i]); err != nil {
 				return nil, err
 			}
