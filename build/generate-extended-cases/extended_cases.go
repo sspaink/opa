@@ -55,6 +55,32 @@ func (t *noopEvalPlugin) PrepareForEval(_ context.Context, policy *ir.Policy, _ 
 // LoadIrExtendedTestCases adds the IR plan to existing testdata for external IR languages to use for testing (e.g. opa-swift)
 // accepts a path to an existing testdata folder (e.g. testdata/v1), reading each test and its cases
 func LoadIrExtendedTestCases() ([]ExtendedSet, error) {
+	return LoadIrExtendedTestCasesFiltered()
+}
+
+// Filters are functions that will return true if a test case should be filtered out
+type Filters func(*ExtendedTestCase) bool
+
+// CapabilitiesFilter will filter out any test cases not using a defined capability
+func CapabilitiesFilter(c *ast.Capabilities) Filters {
+	builtins := map[string]struct{}{}
+	for _, b := range c.Builtins {
+		builtins[b.Name] = struct{}{}
+	}
+
+	return func(r *ExtendedTestCase) bool {
+		for _, b := range r.Plan.Static.BuiltinFuncs {
+			// if the test case contains a builtin not in the capabilities file, reject it
+			if _, ok := builtins[b.Name]; !ok {
+				return true
+			}
+		}
+
+		return false
+	}
+}
+
+func LoadIrExtendedTestCasesFiltered(filters ...Filters) ([]ExtendedSet, error) {
 	// Used by the 'time/time caching' test
 	ast.RegisterBuiltin(&ast.Builtin{
 		Name: "test.sleep",
@@ -95,7 +121,6 @@ func LoadIrExtendedTestCases() ([]ExtendedSet, error) {
 		}
 
 		for _, tc := range x.Cases {
-
 			opts := []func(*rego.Rego){
 				rego.Target(pluginName),
 				rego.Query(tc.Query),
@@ -125,6 +150,18 @@ func LoadIrExtendedTestCases() ([]ExtendedSet, error) {
 			tc.Plan = evalPlugin.prepared
 			tc.EntryPoints = []string{evalPlugin.prepared.Plans.Plans[0].Name}
 			tc.WantPlanResult = tc.WantResult
+
+			var filtered bool
+			for _, filter := range filters {
+				if filter(tc) {
+					filtered = true
+					break
+				}
+			}
+
+			if filtered {
+				continue
+			}
 
 			results = append(results, x)
 		}
