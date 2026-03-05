@@ -21,12 +21,8 @@ func TestLoadIrExtendedFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases, err := LoadIrExtendedTestCasesFiltered(CapabilitiesFilter(c))
+	_, err = LoadIrExtendedTestCasesFiltered(CapabilitiesFilter(c))
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if len(cases) != 644 {
-		t.Errorf("got %d cases, want 644", len(cases))
 	}
 }

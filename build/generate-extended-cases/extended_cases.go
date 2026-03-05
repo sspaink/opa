@@ -23,6 +23,7 @@ type ExtendedTestCase struct {
 	EntryPoints    []string   `json:"entrypoints"`
 	Plan           *ir.Policy `json:"plan"`
 	WantPlanResult any        `json:"want_plan_result"`
+	Ignore         bool       `json:"ignore"`
 }
 
 type ExtendedSet struct {
@@ -151,16 +152,11 @@ func LoadIrExtendedTestCasesFiltered(filters ...Filters) ([]ExtendedSet, error) 
 			tc.EntryPoints = []string{evalPlugin.prepared.Plans.Plans[0].Name}
 			tc.WantPlanResult = tc.WantResult
 
-			var filtered bool
 			for _, filter := range filters {
 				if filter(tc) {
-					filtered = true
+					tc.Ignore = true
 					break
 				}
-			}
-
-			if filtered {
-				continue
 			}
 
 			results = append(results, x)
