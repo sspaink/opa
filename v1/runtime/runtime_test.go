@@ -436,8 +436,7 @@ p contains 1 if {
 
 	for _, tc := range tests {
 		t.Run(tc.note, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
+			ctx := t.Context()
 
 			test.WithTempFS(fs, func(rootDir string) {
 				// Prefix the directory intended to be watched with at least one
@@ -448,9 +447,7 @@ p contains 1 if {
 				output := test.BlockingWriter{}
 
 				params := NewParams()
-				params.Output = &output
 				params.Paths = []string{rootDir}
-				params.Watch = true
 				params.V0Compatible = tc.v0Compatible
 				params.V1Compatible = tc.v1Compatible
 
@@ -459,14 +456,9 @@ p contains 1 if {
 					t.Fatal(err)
 				}
 
-				go func() { _ = rt.StartREPL(ctx) }()
-
-				if !test.Eventually(t, 5*time.Second, func() bool {
-					return strings.Contains(output.String(), "Run 'help' to see a list of commands and check for updates.")
-				}) {
-					t.Fatal("Timed out waiting for REPL to start")
+				if err := rt.startWatcher(ctx, params.Paths, onReloadPrinter(&output)); err != nil {
+					t.Fatal(err)
 				}
-				output.Reset()
 
 				// write new policy to disk, to trigger the watcher
 				if err := os.WriteFile(path.Join(rootDir, "authz.rego"), []byte(tc.policy), 0o644); err != nil {
