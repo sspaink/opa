@@ -1,0 +1,12 @@
+---
+note: partial-set-from-iteration-with-comparison
+modules:
+  - |
+    package test
+
+    p contains x if {
+    	some x in input.xs
+    	x > 1
+    }
+entrypoints:
+  - test/p

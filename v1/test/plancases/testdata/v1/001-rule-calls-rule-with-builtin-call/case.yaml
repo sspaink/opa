@@ -1,0 +1,14 @@
+---
+note: rule-calls-rule-with-builtin-call
+modules:
+  - |
+    package test
+
+    q := input.x
+
+    p := y if {
+    	q
+    	y := 1 + 2
+    }
+entrypoints:
+  - test/p
