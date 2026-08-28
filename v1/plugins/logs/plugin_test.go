@@ -3716,31 +3716,65 @@ type testServer struct {
 	uploadLimit int64
 }
 
+// handle records a decision log upload.
+//
+// Anything that isn't recognizable as an upload is rejected rather than failed
+// on: httptest listens on an ephemeral port, so a request from a client that
+// outlived the server previously holding that port can arrive here, and it
+// shouldn't be reported as a fault of the plugin under test. Every upload sets
+// Content-Encoding and carries a body, so requiring both is enough to tell them
+// apart.
+//
+// Failures are reported with Error/Errorf rather than Fatal/Fatalf, as FailNow
+// must be called from the goroutine running the test and this runs on one of
+// the server's.
 func (t *testServer) handle(w http.ResponseWriter, r *http.Request) {
-	t.t.Helper()
+	if r.Method != http.MethodPost || r.Header.Get("Content-Encoding") != "gzip" {
+		t.t.Logf("decision log test server ignoring unexpected %s request at path %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
-		t.t.Fatal(err)
+		t.t.Error(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if len(b) == 0 {
+		t.t.Logf("decision log test server ignoring request with empty body at path %s", r.URL.Path)
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
 	if int64(len(b)) > t.uploadLimit {
-		t.t.Fatalf("upload limit exceeded expected less than %d but got %d", t.uploadLimit, int64(len(b)))
+		t.t.Errorf("upload limit exceeded expected less than %d but got %d", t.uploadLimit, int64(len(b)))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	gr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
-		t.t.Fatal(err)
+		t.t.Error(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	var events []EventV1
 	if err := json.NewDecoder(gr).Decode(&events); err != nil {
-		t.t.Fatal(err)
+		t.t.Error(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if err := gr.Close(); err != nil {
-		t.t.Fatal(err)
+		t.t.Error(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if t.path != "" && r.URL.Path != t.path {
-		t.t.Fatalf("expecting the request path %s to equal the configured path: %s", r.URL.Path, t.path)
+		t.t.Errorf("expecting the request path %s to equal the configured path: %s", r.URL.Path, t.path)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	t.t.Logf("decision log test server received %d events at path %s", len(events), r.URL.Path)
@@ -4061,8 +4095,10 @@ func TestImmediateMode(t *testing.T) {
 			// Would be really nice to use synctest here but the loop isn't durably blocked
 			// Because multiple external channels can stop the loop
 			time.Sleep(1 * time.Second)
-			defer fixture.plugin.Stop(ctx)
+			// Stop the plugin before the server it uploads to, so its final
+			// flush isn't left racing a closed listener.
 			defer fixture.server.stop()
+			defer fixture.plugin.Stop(ctx)
 
 			fixture.server.ch = make(chan []EventV1, 1)
 
