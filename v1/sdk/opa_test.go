@@ -36,6 +36,7 @@ import (
 	loggingtest "github.com/open-policy-agent/opa/v1/logging/test"
 	"github.com/open-policy-agent/opa/v1/metrics"
 	"github.com/open-policy-agent/opa/v1/plugins"
+	"github.com/open-policy-agent/opa/v1/plugins/logs"
 	"github.com/open-policy-agent/opa/v1/profiler"
 	"github.com/open-policy-agent/opa/v1/rego"
 	"github.com/open-policy-agent/opa/v1/sdk"
@@ -1586,6 +1587,110 @@ main = time.now_ns()
 		t.Fatal(err)
 	}
 
+}
+
+// decisionLogPlugin records the context it is handed by the decision log plugin.
+type decisionLogPlugin struct {
+	manager *plugins.Manager
+	calls   int
+	ctxErr  error
+}
+
+func (p *decisionLogPlugin) Start(context.Context) error {
+	p.manager.UpdatePluginStatus("test_decision_logger", &plugins.Status{State: plugins.StateOK})
+	return nil
+}
+
+func (*decisionLogPlugin) Stop(context.Context) {}
+
+func (*decisionLogPlugin) Reconfigure(context.Context, any) {}
+
+func (p *decisionLogPlugin) Log(ctx context.Context, _ logs.EventV1) error {
+	p.calls++
+	p.ctxErr = ctx.Err()
+	return nil
+}
+
+type decisionLogFactory struct {
+	plugin *decisionLogPlugin
+}
+
+func (f decisionLogFactory) New(m *plugins.Manager, _ any) plugins.Plugin {
+	f.plugin.manager = m
+	return f.plugin
+}
+
+func (decisionLogFactory) Validate(*plugins.Manager, []byte) (any, error) { return nil, nil }
+
+// TestDecisionLoggingWithCancelledContext ensures a cancelled/expired caller context
+// doesn't reach the decision logger, since that can race a mask/drop policy eval
+// inside the logger and cause the decision event to be dropped.
+func TestDecisionLoggingWithCancelledContext(t *testing.T) {
+
+	ctx := t.Context()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+package system
+
+main = true
+`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"plugins": {
+			"test_decision_logger": {}
+		},
+		"decision_logs": {
+			"plugin": "test_decision_logger"
+		}
+	}`, server.URL())
+
+	logger := &decisionLogPlugin{}
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config: strings.NewReader(config),
+		Plugins: map[string]plugins.Factory{
+			"test_decision_logger": decisionLogFactory{plugin: logger},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	// simulate a caller that goes away before the decision is logged
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	// The decision eval may or may not observe the cancellation before it
+	// finishes; both outcomes are fine and asserting either one would be racy.
+	// What matters is the context handed to the decision logger, checked below.
+	if _, err := opa.Decision(cancelled, sdk.DecisionOptions{}); err != nil && !topdown.IsCancel(err) {
+		t.Fatal(err)
+	}
+
+	if logger.calls != 1 {
+		t.Fatalf("expected exactly 1 decision log call but got: %d", logger.calls)
+	}
+
+	if logger.ctxErr != nil {
+		t.Fatalf("expected the decision logger's context to not be cancelled, got: %v", logger.ctxErr)
+	}
 }
 
 func TestDecisionLoggingWithRuleLabels(t *testing.T) {

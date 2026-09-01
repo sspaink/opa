@@ -434,7 +434,9 @@ func (opa *OPA) executeTransaction(ctx context.Context, record *server.Info, wor
 			}
 			*record.Input = asJSON
 		}
-		if err := logger.Log(ctx, record); err != nil {
+		// Decouple from caller cancellation/deadline so a cancelled context can't
+		// race a mask/drop policy eval in the logger and drop the decision event.
+		if err := logger.Log(context.WithoutCancel(ctx), record); err != nil {
 			return result, fmt.Errorf("decision log: %w", err)
 		}
 	}
