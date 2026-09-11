@@ -192,8 +192,8 @@ updates might cause them to be dropped by OPA.
 The --watch flag also applies to the file given by --config-file: when it changes, the new configuration is applied to
 the running plugins without a restart. Plugins and labels can be added and plugins reconfigured this way. Changes OPA
 cannot apply are rejected and leave the running configuration untouched: options only read at start-up
-("default_decision", "default_authorization_decision", "discovery", "distributed_tracing", "metrics_export",
-"persistence_directory", "server" and "storage"), changing or removing a label, and turning a plugin off. The
+("discovery", "distributed_tracing", "metrics_export", "persistence_directory", "server.logger_plugin",
+"server.metrics" and "storage"), changing or removing a label, and turning a plugin off. The
 configuration file is not watched when discovery is enabled, as the discovered configuration is then what the plugins
 are configured with.
 

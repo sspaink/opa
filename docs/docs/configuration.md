@@ -1111,13 +1111,12 @@ configuration file to trigger the reload that reads them.
 
 A few things do not change without a restart:
 
-- **Options read only at start-up.** `default_decision`,
-  `default_authorization_decision`, `discovery`, `distributed_tracing`,
-  `metrics_export`, `persistence_directory`, `server` and `storage` are used to
-  build the store, the exporters and the server before any plugin runs. If a
-  reload changes one of them it is rejected and logged, and the running
-  configuration is left untouched — so a restart is needed, but nothing is
-  applied in part.
+- **Options read only at start-up.** `discovery`, `distributed_tracing`,
+  `metrics_export`, `persistence_directory`, `server.logger_plugin`,
+  `server.metrics` and `storage` are used to build the store, the exporters, the
+  logger and the server before any plugin runs. If a reload changes one of them
+  it is rejected and logged, and the running configuration is left untouched —
+  so a restart is needed, but nothing is applied in part.
 - **Turning a plugin off.** Plugins can be added and reconfigured, but not
   removed: OPA cannot unregister a running plugin, so a reload that would leave
   `decision_logs`, `status` or an entry under `plugins` without a plugin to run
@@ -1136,6 +1135,12 @@ they stay registered for the rest of the process, and OPA logs a warning saying
 so. Changing an entry is applied normally — a plugin already using a service
 picks the new client up, so credentials and URLs can be rotated without a
 restart.
+
+`default_decision` and `default_authorization_decision` are resolved on every
+request, and `server.encoding` and `server.decoding` are swapped into the
+running handler chain, so all four take effect on the next request. Requests
+already being served finish under the limits that were in place when they
+arrived.
 
 If a reload fails for any other reason — a syntax error, or a `bundles` entry
 naming a service that doesn't exist — it is logged and the change is not
