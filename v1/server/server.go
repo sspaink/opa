@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -140,7 +141,6 @@ type Server struct {
 	runtime                     *ast.Term
 	httpListeners               []httpListener
 	metrics                     Metrics
-	defaultDecisionPath         string
 	interQueryBuiltinCache      iCache.InterQueryCache
 	interQueryBuiltinValueCache iCache.InterQueryValueCache
 	allPluginsOkOnce            bool
@@ -150,8 +150,25 @@ type Server struct {
 	cipherSuites                *[]uint16
 	hooks                       hooks.Hooks
 
+	// The handler chain below authentication, and the indirection Handler points
+	// at so Reconfigure can rebuild it without invalidating the handler callers
+	// were given.
+	authnHandler      http.Handler
+	reloadableHandler *reloadableHandler
+
 	compileUnknownsCache     *lru.Cache[string, []ast.Ref]
 	compileMaskingRulesCache *lru.Cache[string, ast.Ref]
+}
+
+// reloadableHandler stands in for the part of the handler chain that the
+// "server" section of the configuration drives. Reconfigure builds a new chain
+// and swaps it in; requests already dispatched finish on the old one.
+type reloadableHandler struct {
+	handler atomic.Pointer[http.Handler]
+}
+
+func (h *reloadableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*h.handler.Load()).ServeHTTP(w, r)
 }
 
 // Metrics defines the interface that the server requires for recording HTTP
@@ -226,24 +243,45 @@ func (s *Server) Init(ctx context.Context) (*Server, error) {
 	}
 
 	s.preparedEvalQueries = newCache(pqMaxCacheSize)
-	s.defaultDecisionPath = s.generateDefaultDecisionPath()
 	s.manager.RegisterNDCacheTrigger(s.updateNDCache)
 
-	s.Handler = s.initHandlerAuthn(s.Handler)
-
-	// compression handler
-	s.Handler, err = s.initHandlerCompression(ctx, s.Handler)
-	if err != nil {
-		return nil, err
-	}
+	s.authnHandler = s.initHandlerAuthn(s.Handler)
 	s.DiagnosticHandler = s.initHandlerAuthn(s.DiagnosticHandler)
 
-	s.Handler, err = s.initHandlerDecodingLimits(ctx, s.Handler)
-	if err != nil {
+	s.reloadableHandler = &reloadableHandler{}
+	if err := s.Reconfigure(ctx, s.manager.GetConfig()); err != nil {
 		return nil, err
 	}
+	s.Handler = s.reloadableHandler
 
 	return s, s.store.Commit(ctx, txn)
+}
+
+// Reconfigure applies the "server" section of a new configuration to a running
+// server. Only the request size limits and the response compression settings
+// can be changed this way; the listeners, the metrics registry and the logger
+// plugin are fixed once the server is initialized.
+//
+// Safe to call while the server is handling requests: the new chain is built
+// first and swapped in atomically, so a configuration that fails to parse
+// leaves the running one in place.
+func (s *Server) Reconfigure(ctx context.Context, cfg *config.Config) error {
+	if s.reloadableHandler == nil {
+		return nil // Init has not run yet.
+	}
+
+	handler, err := initHandlerCompression(ctx, s.authnHandler, cfg)
+	if err != nil {
+		return err
+	}
+
+	handler, err = initHandlerDecodingLimits(ctx, handler, cfg)
+	if err != nil {
+		return err
+	}
+
+	s.reloadableHandler.handler.Store(&handler)
+	return nil
 }
 
 // Shutdown will attempt to gracefully shutdown each of the http servers
@@ -815,8 +853,7 @@ func (s *Server) initHandlerAuthz(handler http.Handler) http.Handler {
 // Enforces request body size limits on incoming requests. For gzipped requests,
 // it passes the size limit down the body-reading method via the request
 // context.
-func (s *Server) initHandlerDecodingLimits(ctx context.Context, handler http.Handler) (http.Handler, error) {
-	cfg := s.manager.GetConfig()
+func initHandlerDecodingLimits(ctx context.Context, handler http.Handler, cfg *config.Config) (http.Handler, error) {
 	var decodingRawConfig []byte
 	if cfg.Server != nil {
 		decodingRawConfig = []byte(cfg.Server.Decoding)
@@ -830,8 +867,7 @@ func (s *Server) initHandlerDecodingLimits(ctx context.Context, handler http.Han
 	return decodingHandler, nil
 }
 
-func (s *Server) initHandlerCompression(ctx context.Context, handler http.Handler) (http.Handler, error) {
-	cfg := s.manager.GetConfig()
+func initHandlerCompression(ctx context.Context, handler http.Handler, cfg *config.Config) (http.Handler, error) {
 	var encodingRawConfig []byte
 	if cfg.Server != nil {
 		encodingRawConfig = []byte(cfg.Server.Encoding)
@@ -1092,7 +1128,6 @@ func (s *Server) reload(_ context.Context, _ storage.Transaction, evt storage.Tr
 
 	// reset some cached info
 	s.preparedEvalQueries = newCache(pqMaxCacheSize)
-	s.defaultDecisionPath = s.generateDefaultDecisionPath()
 	if evt.PolicyChanged() {
 		s.compileUnknownsCache.Purge()
 		s.compileMaskingRulesCache.Purge()

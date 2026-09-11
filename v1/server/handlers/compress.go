@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -26,7 +27,7 @@ const (
 // The threshold and the gzip compression level can be modified from server's configuration
 
 func CompressHandler(handler http.Handler, gzipMinLength int, gzipCompressionLevel int) http.Handler {
-	initGzipPool(gzipCompressionLevel)
+	pool := getGzipPool(gzipCompressionLevel)
 
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		enabledForEndpoint := isDataEndpoint(request) || isCompileEndpoint(request)
@@ -46,6 +47,7 @@ func CompressHandler(handler http.Handler, gzipMinLength int, gzipCompressionLev
 			ResponseWriter: responseWriter,
 			headerWritten:  false,
 			minlength:      gzipMinLength,
+			pool:           pool,
 		}
 		defer crw.Close()
 		handler.ServeHTTP(crw, request)
@@ -55,43 +57,51 @@ func CompressHandler(handler http.Handler, gzipMinLength int, gzipCompressionLev
 type compressResponseWriter struct {
 	gzipWriter *gzip.Writer
 	http.ResponseWriter
+	pool          *gzipWriterPool
 	buffer        []byte
 	statusCode    int
 	headerWritten bool
 	minlength     int
 }
 
+// gzipWriterPool pools gzip writers built at one compression level. Handlers
+// hold on to the pool they were built with and return their writers to it, so a
+// configuration reload that changes the level cannot hand a writer compressing
+// at the old level to the new handler.
+type gzipWriterPool struct {
+	pool  sync.Pool
+	level int
+}
+
 var (
-	gzipPool                 *sync.Pool
-	gzipPoolMutex            sync.RWMutex
-	gzipPoolCompressionLevel int
+	gzipPoolMtx sync.Mutex
+	gzipPool    atomic.Pointer[gzipWriterPool]
 )
 
-// initGzipPool initializes the gzip pool with the specified compression level.
-// Note that this is not called when OPA's configuration is reloaded, only at startup.
-func initGzipPool(compressionLevel int) {
-	gzipPoolMutex.RLock()
-	if gzipPool != nil && gzipPoolCompressionLevel == compressionLevel {
-		gzipPoolMutex.RUnlock()
-		return
-	}
-	gzipPoolMutex.RUnlock()
-
-	gzipPoolMutex.Lock()
-	defer gzipPoolMutex.Unlock()
-
-	if gzipPool != nil && gzipPoolCompressionLevel == compressionLevel {
-		return
+// getGzipPool returns the shared pool for the given compression level, building
+// a new one if the level has changed. The pool is shared so that handlers built
+// with the same level -- the common case, where nothing has been reloaded --
+// reuse each other's writers.
+func getGzipPool(compressionLevel int) *gzipWriterPool {
+	if p := gzipPool.Load(); p != nil && p.level == compressionLevel {
+		return p
 	}
 
-	gzipPool = &sync.Pool{
-		New: func() any {
-			writer, _ := gzip.NewWriterLevel(io.Discard, compressionLevel)
-			return writer
-		},
+	gzipPoolMtx.Lock()
+	defer gzipPoolMtx.Unlock()
+
+	if p := gzipPool.Load(); p != nil && p.level == compressionLevel {
+		return p
 	}
 
-	gzipPoolCompressionLevel = compressionLevel
+	p := &gzipWriterPool{level: compressionLevel}
+	p.pool.New = func() any {
+		writer, _ := gzip.NewWriterLevel(io.Discard, compressionLevel)
+		return writer
+	}
+	gzipPool.Store(p)
+
+	return p
 }
 
 func (w *compressResponseWriter) WriteHeader(statusCode int) {
@@ -145,10 +155,7 @@ func (w *compressResponseWriter) Close() error {
 		return err
 	}
 
-	gzipPoolMutex.RLock()
-	gzipPool.Put(w.gzipWriter)
-	gzipPoolMutex.RUnlock()
-
+	w.pool.pool.Put(w.gzipWriter)
 	w.gzipWriter = nil
 
 	return err
@@ -162,9 +169,7 @@ func (w *compressResponseWriter) doCompressedResponse() error {
 	if len(w.buffer) == 0 {
 		return nil
 	}
-	gzipPoolMutex.RLock()
-	gzipWriter := gzipPool.Get().(*gzip.Writer)
-	gzipPoolMutex.RUnlock()
+	gzipWriter := w.pool.pool.Get().(*gzip.Writer)
 	gzipWriter.Reset(w.ResponseWriter)
 	w.gzipWriter = gzipWriter
 	_, err := w.gzipWriter.Write(w.buffer)
