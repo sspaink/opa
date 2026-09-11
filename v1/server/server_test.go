@@ -2391,6 +2391,65 @@ allow if {
 	}
 }
 
+func TestServerReconfigureServerSection(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	f := newFixtureWithConfig(t, `{"server":{"decoding":{"max_length": 64},"encoding":{"gzip":{"min_length": 3}}}}`)
+
+	if err := f.v1(http.MethodPut, "/policies/test", `package opa.examples
+
+allow_request if input.example.flag
+`, 200, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := newReqV1(http.MethodPost, "/data/opa/examples/allow_request", body)
+		req.Header.Set("Accept-Encoding", "gzip")
+		f.reset()
+		f.server.Handler.ServeHTTP(f.recorder, req)
+		return f.recorder
+	}
+
+	small := `{"input": {"example": {"flag": true}}}`
+	large := fmt.Sprintf(`{"input": {"example": {"flag": true, "pad": %q}}}`, strings.Repeat("a", 128))
+
+	reconfigure := func(raw string) error {
+		cfg, err := config.ParseConfig([]byte(raw), "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.server.Reconfigure(ctx, cfg)
+	}
+
+	if rec := post(small); rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected the response to be compressed, got Content-Encoding %q", rec.Header().Get("Content-Encoding"))
+	}
+	if rec := post(large); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected the body to exceed server.decoding.max_length, got %d: %s", rec.Code, rec.Body)
+	}
+
+	// An invalid section leaves the running chain in place.
+	if err := reconfigure(`{"server":{"decoding":{"max_length": 4096},"encoding":{"gzip":{"compression_level": 42}}}}`); err == nil {
+		t.Fatal("expected the invalid compression level to be rejected")
+	}
+	if rec := post(large); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected the old decoding limit to still apply, got %d: %s", rec.Code, rec.Body)
+	}
+
+	if err := reconfigure(`{"server":{"decoding":{"max_length": 4096},"encoding":{"gzip":{"min_length": 4096}}}}`); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+
+	if rec := post(large); rec.Code != http.StatusOK {
+		t.Fatalf("expected the new decoding limit to apply, got %d: %s", rec.Code, rec.Body)
+	}
+	if rec := post(small); rec.Header().Get("Content-Encoding") != "" {
+		t.Errorf("expected the new gzip min_length to leave the response uncompressed, got Content-Encoding %q", rec.Header().Get("Content-Encoding"))
+	}
+}
+
 func TestDataPostV0CompressedResponse(t *testing.T) {
 	t.Parallel()
 
