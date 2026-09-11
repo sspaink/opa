@@ -28,27 +28,31 @@ import (
 	"github.com/open-policy-agent/opa/v1/util"
 )
 
-// Top-level keys OPA only reads at start-up. A reload that changes one is
-// rejected rather than applied in part.
+// Configuration OPA only reads at start-up, named by dotted path. A reload that
+// changes one is rejected rather than applied in part.
 //
 // None of these are inherently unreloadable; they are consumed once, while the
 // runtime is being built, by something that has no way to be handed a new
 // configuration afterwards. "storage" and "persistence_directory" pick the store
-// the compiler and every plugin already hold a reference to; "server",
-// "default_decision" and "default_authorization_decision" are baked into the
-// server and its routes; "distributed_tracing" and "metrics_export" construct a
-// tracer and a meter provider that are wired into the server and into every REST
-// client at creation, and neither is torn back down; "discovery" would hand
-// ownership of the plugin configuration to the discovery plugin, which is why
-// the watcher does not even start when it is set.
+// the compiler and every plugin already hold a reference to; "server.metrics"
+// registers collectors on the Prometheus registry and wires them into the
+// handler chain; "server.logger_plugin" is resolved once, when the buffered
+// start-up logger is flushed; "distributed_tracing" and "metrics_export"
+// construct a tracer and a meter provider that are wired into the server and
+// into every REST client at creation, and neither is torn back down;
+// "discovery" would hand ownership of the plugin configuration to the discovery
+// plugin, which is why the watcher does not even start when it is set.
+//
+// The rest of "server" -- "encoding" and "decoding" -- is reloadable, as are
+// "default_decision" and "default_authorization_decision", which the server
+// resolves against the manager's configuration on every request.
 var nonReloadableConfigKeys = []string{
-	"default_authorization_decision",
-	"default_decision",
 	"discovery",
 	"distributed_tracing",
 	"metrics_export",
 	"persistence_directory",
-	"server",
+	"server.logger_plugin",
+	"server.metrics",
 	"storage",
 }
 
@@ -211,12 +215,12 @@ func (rt *Runtime) reloadConfig(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// applyConfig hands a new configuration to the plugin manager. Plugins it no
-// longer enables keep running: as with discovery, plugins can be added and
-// reconfigured but not removed, so a configuration that would drop one is
-// rejected. Validating the plugin sections needs the new services registered
-// first, so a failure there leaves the manager holding the new services, keys
-// and caching.
+// applyConfig hands a new configuration to the plugin manager and the server.
+// Plugins it no longer enables keep running: as with discovery, plugins can be
+// added and reconfigured but not removed, so a configuration that would drop one
+// is rejected. Validating the plugin sections needs the new services registered
+// first, so a failure there leaves the manager holding the new services, keys and
+// caching.
 func (rt *Runtime) applyConfig(ctx context.Context, bs []byte) error {
 	oldConf, err := rawConfigMap(rt.appliedConfig)
 	if err != nil {
@@ -267,6 +271,15 @@ func (rt *Runtime) applyConfig(ctx context.Context, bs []byte) error {
 		return err
 	}
 
+	// The request size limits and response compression live in the handler chain
+	// the server built at start-up, not in a plugin, so the server has to be told
+	// separately. Nothing to do when running without one, as the REPL does.
+	if rt.server != nil {
+		if err := rt.server.Reconfigure(ctx, parsed); err != nil {
+			return err
+		}
+	}
+
 	registeredPluginsMux.Lock()
 	factories := maps.Clone(registeredPlugins)
 	registeredPluginsMux.Unlock()
@@ -297,16 +310,32 @@ func rawConfigMap(bs []byte) (map[string]any, error) {
 	return conf, nil
 }
 
-// changedKeys returns the keys whose value differs between two configurations.
-func changedKeys(oldConf, newConf map[string]any, keys []string) []string {
+// changedKeys returns the paths whose value differs between two configurations.
+func changedKeys(oldConf, newConf map[string]any, paths []string) []string {
 	var changed []string
-	for _, k := range keys {
-		if !reflect.DeepEqual(oldConf[k], newConf[k]) {
-			changed = append(changed, k)
+	for _, p := range paths {
+		if !reflect.DeepEqual(configValue(oldConf, p), configValue(newConf, p)) {
+			changed = append(changed, p)
 		}
 	}
 
 	return changed
+}
+
+// configValue looks up a dotted path in a decoded configuration. A path that
+// runs into a missing key, or into something that is not an object, resolves to
+// nil, so an absent section and an absent key inside one compare equal.
+func configValue(conf map[string]any, path string) any {
+	var v any = conf
+	for k := range strings.SplitSeq(path, ".") {
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = obj[k]
+	}
+
+	return v
 }
 
 // droppedKeys returns the given keys that held entries the new configuration no

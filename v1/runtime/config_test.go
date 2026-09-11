@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,7 @@ import (
 	"github.com/open-policy-agent/opa/v1/plugins/status"
 	sdktest "github.com/open-policy-agent/opa/v1/sdk/test"
 	"github.com/open-policy-agent/opa/v1/storage"
+	"github.com/open-policy-agent/opa/v1/util/test"
 )
 
 func newConfigReloadRuntime(t *testing.T, config string) (*Runtime, string) {
@@ -139,14 +141,25 @@ func TestReloadConfigRejectsNonReloadableChanges(t *testing.T) {
 		key    string
 	}{
 		{
-			note: "server",
+			note: "server.metrics",
 			config: `labels:
   region: west
 server:
-  decoding:
-    max_length: 42
+  metrics:
+    prom:
+      http_request_duration_seconds:
+        buckets: [0.1, 1]
 `,
-			key: "server",
+			key: "server.metrics",
+		},
+		{
+			note: "server.logger_plugin",
+			config: `labels:
+  region: west
+server:
+  logger_plugin: my_logger
+`,
+			key: "server.logger_plugin",
 		},
 		{
 			note: "storage",
@@ -167,25 +180,19 @@ persistence_directory: /var/opa
 			key: "persistence_directory",
 		},
 		{
-			note: "default_decision",
-			config: `labels:
-  region: west
-default_decision: /example/allow
-`,
-			key: "default_decision",
-		},
-		{
 			note: "several at once",
 			config: `labels:
   region: west
 server:
-  decoding:
-    max_length: 42
+  metrics:
+    prom:
+      http_request_duration_seconds:
+        buckets: [0.1, 1]
 storage:
   disk:
     directory: /tmp/opa
 `,
-			key: "server, storage",
+			key: "server.metrics, storage",
 		},
 	} {
 		t.Run(tc.note, func(t *testing.T) {
@@ -587,6 +594,88 @@ bundles:
 	waitForBundle(t, rt, "second")
 }
 
+func TestReloadConfigAppliesDecisionDefaults(t *testing.T) {
+	rt, configFile := newConfigReloadRuntime(t, `labels:
+  region: west
+`)
+
+	writeConfig(t, configFile, `labels:
+  region: west
+default_decision: /example/allow
+default_authorization_decision: /example/authz/allow
+`)
+
+	if _, err := rt.reloadConfig(t.Context()); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+
+	// The server resolves both against the manager's configuration on every
+	// request, so landing here is all it takes for them to be in effect.
+	conf := rt.Manager.GetConfig()
+	if got := *conf.DefaultDecision; got != "/example/allow" {
+		t.Errorf("expected default decision /example/allow, got %q", got)
+	}
+	if got := *conf.DefaultAuthorizationDecision; got != "/example/authz/allow" {
+		t.Errorf("expected default authorization decision /example/authz/allow, got %q", got)
+	}
+}
+
+// TestReloadConfigAppliesServerSection exercises the whole path -- watcher
+// through to a live handler -- for the parts of "server" that can be reloaded.
+func TestReloadConfigAppliesServerSection(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	writeConfig(t, configFile, `server:
+  decoding:
+    max_length: 64
+`)
+
+	params := NewParams()
+	params.ConfigFile = configFile
+	params.Output = io.Discard
+	params.Logger = testLog.New()
+	params.Addrs = &[]string{"localhost:0"}
+
+	ctx := t.Context()
+	rt, err := NewRuntime(ctx, params)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+
+	go rt.StartServer(ctx)
+	if !test.Eventually(t, 10*time.Second, func() bool {
+		return rt.ServerStatus() == ServerInitialized && len(rt.Addrs()) > 0
+	}) {
+		t.Fatal("timed out waiting for the server to start")
+	}
+
+	body := fmt.Sprintf(`{"input": {"pad": %q}}`, strings.Repeat("a", 128))
+	post := func() int {
+		resp, err := http.Post("http://"+rt.Addrs()[0]+"/v1/data", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post(); code != http.StatusBadRequest {
+		t.Fatalf("expected the body to exceed server.decoding.max_length, got %d", code)
+	}
+
+	writeConfig(t, configFile, `server:
+  decoding:
+    max_length: 4096
+`)
+
+	if _, err := rt.reloadConfig(ctx); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+
+	if code := post(); code != http.StatusOK {
+		t.Fatalf("expected the new decoding limit to apply, got %d", code)
+	}
+}
+
 // waitForBundle blocks until data.reload.which has the expected value, which is
 // how far the bundle has got through downloading and activating.
 func waitForBundle(t *testing.T, rt *Runtime, exp string) {
@@ -920,14 +1009,19 @@ func TestChangedConfigKeys(t *testing.T) {
 	}{
 		{
 			note: "no change",
-			old:  "server:\n  decoding:\n    max_length: 42\n",
-			new:  "server:\n  decoding:\n    max_length: 42\n",
+			old:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n",
+			new:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n",
 		},
 		{
 			note: "change in a watched key",
-			old:  "server:\n  decoding:\n    max_length: 42\n",
-			new:  "server:\n  decoding:\n    max_length: 43\n",
-			exp:  []string{"server"},
+			old:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n",
+			new:  "server:\n  metrics:\n    prom:\n      buckets: [2]\n",
+			exp:  []string{"server.metrics"},
+		},
+		{
+			note: "change in a sibling of a watched key",
+			old:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n  decoding:\n    max_length: 42\n",
+			new:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n  decoding:\n    max_length: 43\n",
 		},
 		{
 			note: "watched key added",
@@ -942,14 +1036,31 @@ func TestChangedConfigKeys(t *testing.T) {
 			exp:  []string{"storage"},
 		},
 		{
+			note: "section holding a watched key removed",
+			old:  "server:\n  logger_plugin: my_logger\n",
+			new:  "labels:\n  region: west\n",
+			exp:  []string{"server.logger_plugin"},
+		},
+		{
+			note: "section holding no watched key added",
+			old:  "labels:\n  region: west\n",
+			new:  "labels:\n  region: west\nserver:\n  decoding:\n    max_length: 42\n",
+		},
+		{
 			note: "change outside the watched keys",
 			old:  "labels:\n  region: west\n",
 			new:  "labels:\n  region: east\ndecision_logs:\n  console: true\n",
 		},
 		{
 			note: "key order is not a change",
-			old:  "server:\n  encoding:\n    gzip:\n      min_length: 1\n  decoding:\n    max_length: 42\n",
-			new:  "server:\n  decoding:\n    max_length: 42\n  encoding:\n    gzip:\n      min_length: 1\n",
+			old:  "server:\n  logger_plugin: my_logger\n  metrics:\n    prom:\n      buckets: [1]\n",
+			new:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n  logger_plugin: my_logger\n",
+		},
+		{
+			note: "a scalar where a section is expected does not panic",
+			old:  "server:\n  metrics:\n    prom:\n      buckets: [1]\n",
+			new:  "server: nope\n",
+			exp:  []string{"server.metrics"},
 		},
 	}
 
