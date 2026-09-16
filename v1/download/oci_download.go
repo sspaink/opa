@@ -507,16 +507,22 @@ func (t *ociTarget) Exists(ctx context.Context, target ocispec.Descriptor) (bool
 }
 
 // pluginRoundTripper injects authentication headers via the rest.HTTPAuthPlugin
-// on requests that don't already carry an Authorization header. This allows ORAS's
-// auth.Client to handle Docker token exchange challenges while still using the
-// plugin's credentials for both direct auth and token-service authentication.
+// on requests that don't already carry an Authorization header, except on requests
+// produced by following a redirect. This allows ORAS's auth.Client to handle Docker
+// token exchange challenges while still using the plugin's credentials for both
+// direct auth and token-service authentication.
 type pluginRoundTripper struct {
 	base   http.RoundTripper
 	plugin rest.HTTPAuthPlugin
 }
 
 func (t *pluginRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Header.Get("Authorization") == "" {
+	// req.Response is only set on a request the http.Client built by following a
+	// redirect. net/http drops the Authorization header when a redirect leaves the
+	// original domain, so re-preparing such a request would hand the registry's
+	// credentials to whatever host it pointed at. Registries routinely redirect
+	// blob fetches to object storage, ECR to S3 for instance.
+	if req.Response == nil && req.Header.Get("Authorization") == "" {
 		if err := t.plugin.Prepare(req); err != nil {
 			return nil, fmt.Errorf("failed to prepare request: %w", err)
 		}

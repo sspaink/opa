@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -349,6 +350,82 @@ func TestOCITokenAuth(t *testing.T) {
 
 	if err := d.oneShot(ctx); err != nil {
 		t.Fatalf("Unexpected error: %s", err)
+	}
+}
+
+func TestOCIRedirectDoesNotResendCredentials(t *testing.T) {
+	// Registries commonly redirect blob fetches to object storage - ECR to S3,
+	// for instance. net/http drops the Authorization header when a redirect
+	// leaves the original domain, but pluginRoundTripper re-prepares any request
+	// that arrives without one, which would put the credentials straight back on.
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var blobAuth string
+			blobHit := false
+			blobServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				blobHit = true
+				blobAuth = r.Header.Get("Authorization")
+			}))
+			defer blobServer.Close()
+
+			// httptest listens on 127.0.0.1; redirecting to "localhost" keeps the test
+			// local while still crossing a domain boundary as far as net/http is concerned.
+			blobURL := strings.Replace(blobServer.URL, "127.0.0.1", "localhost", 1)
+
+			var registryAuth string
+			registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				registryAuth = r.Header.Get("Authorization")
+				http.Redirect(w, r, blobURL+"/blob", status)
+			}))
+			defer registryServer.Close()
+
+			restConf := fmt.Sprintf(`{
+				"url": %q,
+				"type": "oci",
+				"credentials": {
+					"bearer": {
+						"token": "secret"
+					}
+				}
+			}`, registryServer.URL)
+
+			client, err := rest.New([]byte(restConf), map[string]*keys.Config{})
+			if err != nil {
+				t.Fatalf("failed to create rest client: %s", err)
+			}
+
+			plugin, err := client.Config().AuthPlugin(nil)
+			if err != nil {
+				t.Fatalf("failed to look up auth plugin: %s", err)
+			}
+
+			target, err := newOCITarget(plugin, client.Config(), "ghcr.io/org/repo:latest")
+			if err != nil {
+				t.Fatalf("failed to create oci target: %s", err)
+			}
+
+			resp, err := target.client.Client.Get(registryServer.URL + "/v2/org/repo/blobs/sha256:abc")
+			if err != nil {
+				t.Fatalf("request failed: %s", err)
+			}
+			resp.Body.Close()
+
+			if registryAuth == "" {
+				t.Fatal("expected the registry request to carry credentials")
+			}
+			if !blobHit {
+				t.Fatal("expected the redirect to be followed")
+			}
+			if blobAuth != "" {
+				t.Fatalf("credentials leaked to redirect target: got Authorization %q", blobAuth)
+			}
+		})
 	}
 }
 
