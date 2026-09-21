@@ -11763,7 +11763,10 @@ func TestCompilerBuildComprehensionIndexKeySet(t *testing.T) {
 			}
 
 			messages := strings.Split(dbg.String(), "\n")
-			messages = messages[:len(messages)-1] // last one is an empty string
+			messages = slices.DeleteFunc(messages, func(m string) bool {
+				// Other stages share the debug writer.
+				return !strings.Contains(m, "comprehension index:")
+			})
 			if exp, act := tc.wantDebug, len(messages); exp != act {
 				t.Errorf("expected %d debug messages, got %d", exp, act)
 				for i, m := range messages {

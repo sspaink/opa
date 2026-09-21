@@ -3033,6 +3033,88 @@ func TestStrictBuiltinErrors(t *testing.T) {
 	}
 }
 
+func TestStrictBuiltinErrorsHoistedComprehensionInvariant(t *testing.T) {
+	module := `package test
+
+p := y if {
+	x := input.x
+	y := {v | v := data.empty[_]; z := x / 0; v == z}
+}`
+
+	store := inmem.NewFromObject(map[string]any{"empty": []any{}})
+
+	opts := func(strict bool) []func(*Rego) {
+		return []func(*Rego){
+			Query("data.test.p"),
+			Module("test.rego", module),
+			Store(store),
+			Input(map[string]any{"x": 1}),
+			StrictBuiltinErrors(strict),
+		}
+	}
+
+	// data.empty has no members, so the division is never reached in the order
+	// the policy was written. The compiler hoists it ahead of the generator
+	// because it only reads x, which would make it reachable, so the evaluator
+	// has to fall back to the body as written once errors become fatal.
+	for _, strict := range []bool{false, true} {
+		rs, err := New(opts(strict)...).Eval(t.Context())
+		if err != nil {
+			t.Fatalf("strict=%v: %v", strict, err)
+		}
+		if len(rs) != 1 {
+			t.Fatalf("strict=%v: expected the rule to be defined, got: %v", strict, rs)
+		}
+		if exp, act := []any{}, rs[0].Expressions[0].Value; !reflect.DeepEqual(exp, act) {
+			t.Fatalf("strict=%v: expected %v, got %v", strict, exp, act)
+		}
+	}
+
+	// The same fallback has to work for a comprehension in an ad-hoc query,
+	// where the body is recorded by the query compiler rather than the module
+	// compiler.
+	for _, strict := range []bool{false, true} {
+		rs, err := New(
+			Query(`y = {v | v = data.empty[_]; z = input.x / 0; v = z}`),
+			Store(store),
+			Input(map[string]any{"x": 1}),
+			StrictBuiltinErrors(strict),
+		).Eval(t.Context())
+		if err != nil {
+			t.Fatalf("query, strict=%v: %v", strict, err)
+		}
+		if len(rs) != 1 {
+			t.Fatalf("query, strict=%v: expected one result, got: %v", strict, rs)
+		}
+	}
+
+	// An error the policy does reach is still reported.
+	reachable := `package test
+
+p := y if {
+	x := input.x
+	y := {v | v := data.one[_]; z := x / 0; v == z}
+}`
+
+	_, err := New(
+		Query("data.test.p"),
+		Module("test.rego", reachable),
+		Store(inmem.NewFromObject(map[string]any{"one": []any{1}})),
+		Input(map[string]any{"x": 1}),
+		StrictBuiltinErrors(true),
+	).Eval(t.Context())
+	if err == nil {
+		t.Fatal("expected a builtin error under strict builtin errors")
+	}
+	topdownErr, ok := err.(*topdown.Error)
+	if !ok {
+		t.Fatal("expected topdown error but got:", err)
+	}
+	if topdownErr.Code != topdown.BuiltinErr || topdownErr.Message != "div: divide by zero" {
+		t.Fatal("expected divide by zero error but got:", topdownErr)
+	}
+}
+
 func TestBuiltinErrorList(t *testing.T) {
 	var buf []topdown.Error
 

@@ -521,6 +521,59 @@ not_indexed_because_nested_closure if {
 
 > The 4th and 5th restrictions may be relaxed in the future.
 
+### Comprehension Loop Invariants
+
+A comprehension body is evaluated once for every solution of the statements that
+precede it. An expression inside that body whose inputs are all bound outside the
+comprehension produces the same result on every one of those iterations, so OPA
+moves it ahead of the statements that iterate:
+
+```rego
+package example
+
+p[name] := ports if {
+    some name
+    input.interfaces[name]
+    ports := {port |
+        some entry in input.exposed
+        port := entry.port
+        entry.interface == upper(name)
+    }
+}
+```
+
+`upper(name)` only reads `name`, which the enclosing rule body binds, so OPA
+evaluates it once per interface instead of once per entry in `input.exposed`.
+Where the invariant expression binds a variable used to index a reference, the
+reference turns into a lookup rather than a scan, which is where most of the
+saving comes from.
+
+This only reorders statements within the comprehension body; the expression is
+never lifted into the enclosing rule. An expression that is undefined still
+yields an empty collection rather than making the whole rule undefined.
+
+Expressions are left where they are when:
+
+1. They read a variable the comprehension body itself binds.
+1. They can have more than one solution, which for an array comprehension would
+   change the order of the elements. A reference with an unbound position and a
+   call to `walk()` both fall into this category.
+1. They call a non-deterministic built-in function such as `http.send`,
+   `time.now_ns`, or `rand.intn`, or a built-in whose evaluation is observable,
+   such as `print` and `trace`. Nothing is moved ahead of such a call either,
+   since the expression that moved could be undefined and the call would then
+   never happen at all.
+1. The comprehension is indexed. Indexing evaluates the comprehension once in
+   total rather than once per binding of the enclosing body, so it wins where
+   both apply.
+
+An expression moved ahead of a generator is evaluated even when that generator
+turns out to have no solutions. That is invisible while a built-in error leaves
+an expression undefined, but not under `--strict-builtin-errors`, where it would
+report an error the policy as written never reaches. Under that flag OPA
+evaluates comprehension bodies in the order they were written, so results are
+the same either way and only the speed-up is given up.
+
 ### Profiling
 
 You can also profile your policies using `opa eval`. The profiler is useful if you need to understand

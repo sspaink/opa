@@ -164,6 +164,7 @@ type Compiler struct {
 	deprecatedBuiltinsMap      map[string]struct{}           // set of deprecated, but not removed, built-in functions
 	enablePrintStatements      bool                          // indicates if print statements should be elided (default)
 	comprehensionIndices       map[*Term]*ComprehensionIndex // comprehension key index
+	comprehensionSourceOrder   map[Value]Body                // bodies of hoisted comprehensions, as written
 	initialized                bool                          // indicates if init() has been called
 	debug                      debug.Debug                   // emits debug information produced during compilation
 	schemaSet                  *SchemaSet                    // user-supplied schemas for input and data documents
@@ -198,41 +199,42 @@ type StageID string
 // There is no guarantee that they are stable across OPA versions, but using the identifiers
 // at least lets you know what your attention is needed when you depend on the stages.
 const (
-	StageResolveRefs                StageID = "ResolveRefs"
-	StageCheckUnusedImports         StageID = "CheckUnusedImports"
-	StageInitLocalVarGen            StageID = "InitLocalVarGen"
-	StageRewriteRuleHeadRefs        StageID = "RewriteRuleHeadRefs"
-	StageCheckKeywordOverrides      StageID = "CheckKeywordOverrides"
-	StageCheckDuplicateImports      StageID = "CheckDuplicateImports"
-	StageRemoveImports              StageID = "RemoveImports"
-	StageSetModuleTree              StageID = "SetModuleTree"
-	StageSetRuleTree                StageID = "SetRuleTree"
-	StageRewriteLocalVars           StageID = "RewriteLocalVars"
-	StageRewriteTemplateStrings     StageID = "RewriteTemplateStrings"
-	StageCheckVoidCalls             StageID = "CheckVoidCalls"
-	StageRewritePrintCalls          StageID = "RewritePrintCalls"
-	StageRewriteExprTerms           StageID = "RewriteExprTerms"
-	StageParseMetadataBlocks        StageID = "ParseMetadataBlocks"
-	StageSetAnnotationSet           StageID = "SetAnnotationSet"
-	StageRewriteRegoMetadataCalls   StageID = "RewriteRegoMetadataCalls"
-	StageSetGraph                   StageID = "SetGraph"
-	StageRewriteComprehensionTerms  StageID = "RewriteComprehensionTerms"
-	StageRewriteRefsInHead          StageID = "RewriteRefsInHead"
-	StageRewriteWithValues          StageID = "RewriteWithValues"
-	StageCheckRuleConflicts         StageID = "CheckRuleConflicts"
-	StageCheckUndefinedFuncs        StageID = "CheckUndefinedFuncs"
-	StageCheckSafetyRuleHeads       StageID = "CheckSafetyRuleHeads"
-	StageCheckSafetyRuleBodies      StageID = "CheckSafetyRuleBodies"
-	StageRewriteEquals              StageID = "RewriteEquals"
-	StageRewriteDynamicTerms        StageID = "RewriteDynamicTerms"
-	StageRewriteTestRulesForTracing StageID = "RewriteTestRulesForTracing"
-	StageCheckRecursion             StageID = "CheckRecursion"
-	StageCheckTypes                 StageID = "CheckTypes"
-	StageCheckUnsafeBuiltins        StageID = "CheckUnsafeBuiltins"
-	StageCheckDeprecatedBuiltins    StageID = "CheckDeprecatedBuiltins"
-	StageBuildRuleIndices           StageID = "BuildRuleIndices"
-	StageBuildComprehensionIndices  StageID = "BuildComprehensionIndices"
-	StageBuildRequiredCapabilities  StageID = "BuildRequiredCapabilities"
+	StageResolveRefs                  StageID = "ResolveRefs"
+	StageCheckUnusedImports           StageID = "CheckUnusedImports"
+	StageInitLocalVarGen              StageID = "InitLocalVarGen"
+	StageRewriteRuleHeadRefs          StageID = "RewriteRuleHeadRefs"
+	StageCheckKeywordOverrides        StageID = "CheckKeywordOverrides"
+	StageCheckDuplicateImports        StageID = "CheckDuplicateImports"
+	StageRemoveImports                StageID = "RemoveImports"
+	StageSetModuleTree                StageID = "SetModuleTree"
+	StageSetRuleTree                  StageID = "SetRuleTree"
+	StageRewriteLocalVars             StageID = "RewriteLocalVars"
+	StageRewriteTemplateStrings       StageID = "RewriteTemplateStrings"
+	StageCheckVoidCalls               StageID = "CheckVoidCalls"
+	StageRewritePrintCalls            StageID = "RewritePrintCalls"
+	StageRewriteExprTerms             StageID = "RewriteExprTerms"
+	StageParseMetadataBlocks          StageID = "ParseMetadataBlocks"
+	StageSetAnnotationSet             StageID = "SetAnnotationSet"
+	StageRewriteRegoMetadataCalls     StageID = "RewriteRegoMetadataCalls"
+	StageSetGraph                     StageID = "SetGraph"
+	StageRewriteComprehensionTerms    StageID = "RewriteComprehensionTerms"
+	StageRewriteRefsInHead            StageID = "RewriteRefsInHead"
+	StageRewriteWithValues            StageID = "RewriteWithValues"
+	StageCheckRuleConflicts           StageID = "CheckRuleConflicts"
+	StageCheckUndefinedFuncs          StageID = "CheckUndefinedFuncs"
+	StageCheckSafetyRuleHeads         StageID = "CheckSafetyRuleHeads"
+	StageCheckSafetyRuleBodies        StageID = "CheckSafetyRuleBodies"
+	StageRewriteEquals                StageID = "RewriteEquals"
+	StageRewriteDynamicTerms          StageID = "RewriteDynamicTerms"
+	StageRewriteTestRulesForTracing   StageID = "RewriteTestRulesForTracing"
+	StageCheckRecursion               StageID = "CheckRecursion"
+	StageCheckTypes                   StageID = "CheckTypes"
+	StageCheckUnsafeBuiltins          StageID = "CheckUnsafeBuiltins"
+	StageCheckDeprecatedBuiltins      StageID = "CheckDeprecatedBuiltins"
+	StageBuildRuleIndices             StageID = "BuildRuleIndices"
+	StageBuildComprehensionIndices    StageID = "BuildComprehensionIndices"
+	StageHoistComprehensionInvariants StageID = "HoistComprehensionInvariants"
+	StageBuildRequiredCapabilities    StageID = "BuildRequiredCapabilities"
 
 	// These only exist in the [ast.QueryCompiler]:
 	StageCheckSafety StageID = "CheckSafety"
@@ -275,6 +277,7 @@ func AllStages() []StageID {
 		StageCheckDeprecatedBuiltins,
 		StageBuildRuleIndices,
 		StageBuildComprehensionIndices,
+		StageHoistComprehensionInvariants,
 		StageBuildRequiredCapabilities,
 	}
 }
@@ -439,18 +442,19 @@ type stage struct {
 func NewCompiler() *Compiler {
 
 	c := &Compiler{
-		Modules:               map[string]*Module{},
-		RewrittenVars:         map[Var]Var{},
-		Required:              &Capabilities{},
-		externalSources:       util.NewHasherMap[Ref, ExternalRuleSource](RefEqual),
-		maxErrs:               CompileErrorLimitDefault,
-		mu:                    &sync.Mutex{},
-		after:                 map[string][]CompilerStageDefinition{},
-		unsafeBuiltinsMap:     map[string]struct{}{},
-		deprecatedBuiltinsMap: map[string]struct{}{},
-		comprehensionIndices:  map[*Term]*ComprehensionIndex{},
-		debug:                 debug.Discard(),
-		defaultRegoVersion:    DefaultRegoVersion,
+		Modules:                  map[string]*Module{},
+		RewrittenVars:            map[Var]Var{},
+		Required:                 &Capabilities{},
+		externalSources:          util.NewHasherMap[Ref, ExternalRuleSource](RefEqual),
+		maxErrs:                  CompileErrorLimitDefault,
+		mu:                       &sync.Mutex{},
+		after:                    map[string][]CompilerStageDefinition{},
+		unsafeBuiltinsMap:        map[string]struct{}{},
+		deprecatedBuiltinsMap:    map[string]struct{}{},
+		comprehensionIndices:     map[*Term]*ComprehensionIndex{},
+		comprehensionSourceOrder: map[Value]Body{},
+		debug:                    debug.Discard(),
+		defaultRegoVersion:       DefaultRegoVersion,
 	}
 
 	c.ModuleTree = NewModuleTree(nil)
@@ -497,6 +501,7 @@ func NewCompiler() *Compiler {
 		{StageCheckDeprecatedBuiltins, "compile_state_check_deprecated_builtins", c.checkDeprecatedBuiltins},
 		{StageBuildRuleIndices, "compile_stage_rebuild_indices", c.buildRuleIndices},
 		{StageBuildComprehensionIndices, "compile_stage_rebuild_comprehension_indices", c.buildComprehensionIndices},
+		{StageHoistComprehensionInvariants, "compile_stage_hoist_comprehension_invariants", c.hoistComprehensionInvariants},
 		{StageBuildRequiredCapabilities, "compile_stage_build_required_capabilities", c.buildRequiredCapabilities},
 	}
 
@@ -1179,6 +1184,37 @@ func (c *Compiler) buildRuleIndices() {
 		}
 		return hasNonGroundRef // currently, we don't allow those branches to go deeper
 	})
+}
+
+func (c *Compiler) hoistComprehensionInvariants() {
+	vis := varVisitorPool.Get()
+	indexed := indexedComprehensions(c.comprehensionIndices)
+
+	for _, name := range c.sorted {
+		WalkRules(c.Modules[name], func(r *Rule) bool {
+			vis = vis.Clear()
+			vis.vars.Update(ReservedVars)
+			if len(r.Head.Args) > 0 {
+				vis.WalkArgs(r.Head.Args)
+			}
+			n := hoistComprehensionInvariants(c.debug, c.builtins, c.GetArity, vis.vars, r.Body, indexed, c.comprehensionSourceOrder)
+			c.counterAdd(compileStageComprehensionHoist, n)
+			return false
+		})
+	}
+
+	varVisitorPool.Put(vis)
+}
+
+// ComprehensionSourceOrder returns the body of the comprehension x as it was
+// written, before the compiler moved its loop invariants to the front. It
+// returns nil when the comprehension was not rewritten.
+//
+// Reordering assumes a built-in error makes an expression undefined. Evaluators
+// that instead treat built-in errors as fatal must use the body returned here,
+// otherwise they can report an error the policy as written never reaches.
+func (c *Compiler) ComprehensionSourceOrder(x Value) Body {
+	return c.comprehensionSourceOrder[x]
 }
 
 func (c *Compiler) buildComprehensionIndices() {
@@ -3706,15 +3742,17 @@ type queryCompiler struct {
 	after                 map[string][]QueryCompilerStageDefinition
 	unsafeBuiltins        map[string]struct{}
 	comprehensionIndices  map[*Term]*ComprehensionIndex
+	comprehensionSrcOrder map[Value]Body
 	enablePrintStatements bool
 }
 
 func newQueryCompiler(compiler *Compiler) QueryCompiler {
 	qc := &queryCompiler{
-		compiler:             compiler,
-		qctx:                 nil,
-		after:                map[string][]QueryCompilerStageDefinition{},
-		comprehensionIndices: map[*Term]*ComprehensionIndex{},
+		compiler:              compiler,
+		qctx:                  nil,
+		after:                 map[string][]QueryCompilerStageDefinition{},
+		comprehensionIndices:  map[*Term]*ComprehensionIndex{},
+		comprehensionSrcOrder: map[Value]Body{},
 	}
 	return qc
 }
@@ -3810,6 +3848,7 @@ func (qc *queryCompiler) Compile(query Body) (Body, error) {
 	if qc.compiler.evalMode == EvalModeTopdown {
 		stages = append(stages, queryStage{"BuildComprehensionIndex", "query_compile_stage_build_comprehension_index", qc.buildComprehensionIndices})
 	}
+	stages = append(stages, queryStage{StageHoistComprehensionInvariants, "query_compile_stage_hoist_comprehension_invariants", qc.hoistComprehensionInvariants})
 
 	qctx := qc.qctx.Copy()
 
@@ -4007,6 +4046,21 @@ func (qc *queryCompiler) rewriteWithModifiers(_ *QueryContext, body Body) (Body,
 		return nil, Errors{err}
 	}
 	return body, nil
+}
+
+func (qc *queryCompiler) hoistComprehensionInvariants(_ *QueryContext, body Body) (Body, error) {
+	_ = hoistComprehensionInvariants(qc.compiler.debug, qc.compiler.builtins, qc.compiler.GetArity,
+		ReservedVars, body, indexedComprehensions(qc.comprehensionIndices), qc.comprehensionSrcOrder)
+	return body, nil
+}
+
+// ComprehensionSourceOrder returns the body of the comprehension x as it was
+// written. See [Compiler.ComprehensionSourceOrder].
+func (qc *queryCompiler) ComprehensionSourceOrder(x Value) Body {
+	if body, ok := qc.comprehensionSrcOrder[x]; ok {
+		return body
+	}
+	return qc.compiler.ComprehensionSourceOrder(x)
 }
 
 func (qc *queryCompiler) buildComprehensionIndices(_ *QueryContext, body Body) (Body, error) {

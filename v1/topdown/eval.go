@@ -124,6 +124,7 @@ type eval struct {
 	skipSaveNamespace           bool
 	findOne                     bool
 	strictObjects               bool
+	strictBuiltinErrors         bool
 	defined                     bool
 	requestMetadata             map[string]any
 	responseMetadata            map[string]any
@@ -1511,6 +1512,7 @@ func (e *eval) biunifyComprehensionPartial(a, b *ast.Term, b1, b2 *bindings, swa
 // amendComprehension captures bindings available to the comprehension,
 // and used within its term or body.
 func (e *eval) amendComprehension(a *ast.Term, b1 *bindings) (*ast.Term, error) {
+	orig := a.Value
 	cpyA := a.Copy()
 
 	// Namespace the variables in the body to avoid collision when the final
@@ -1526,6 +1528,13 @@ func (e *eval) amendComprehension(a *ast.Term, b1 *bindings) (*ast.Term, error) 
 		body = &a.Body
 	default:
 		return nil, fmt.Errorf("illegal comprehension %T", a)
+	}
+
+	// This copy ends up in the residual policy, where the compiler tables that
+	// remember how the body was written no longer reach it. Restore the written
+	// order so a strict evaluation of the result cannot see the hoisted one.
+	if src := e.comprehensionSourceOrder(orig); src != nil {
+		*body = src.Copy()
 	}
 
 	vars := a.Vars()
@@ -1547,7 +1556,7 @@ func (e *eval) biunifyComprehensionArray(x *ast.ArrayComprehension, b *ast.Term,
 	var elements []*ast.Term
 	child := evalPool.Get()
 
-	e.closure(x.Body, child)
+	e.closure(e.comprehensionBody(x, x.Body), child)
 	defer evalPool.Put(child)
 
 	err := child.Run(func(child *eval) error {
@@ -1568,7 +1577,7 @@ func (e *eval) biunifyComprehensionArray(x *ast.ArrayComprehension, b *ast.Term,
 func (e *eval) biunifyComprehensionSet(x *ast.SetComprehension, b *ast.Term, b1, b2 *bindings, iter unifyIterator) error {
 	child := evalPool.Get()
 
-	e.closure(x.Body, child)
+	e.closure(e.comprehensionBody(x, x.Body), child)
 	defer evalPool.Put(child)
 
 	var result ast.Set
@@ -1595,7 +1604,7 @@ func (e *eval) biunifyComprehensionObject(x *ast.ObjectComprehension, b *ast.Ter
 	child := evalPool.Get()
 	defer evalPool.Put(child)
 
-	e.closure(x.Body, child)
+	e.closure(e.comprehensionBody(x, x.Body), child)
 
 	var result ast.Object
 	err := child.Run(func(child *eval) error {
@@ -4702,6 +4711,40 @@ func (e *eval) comprehensionIndex(term *ast.Term) *ast.ComprehensionIndex {
 		return e.queryCompiler.ComprehensionIndex(term)
 	}
 	return e.compiler.ComprehensionIndex(term)
+}
+
+// comprehensionSourceOrder returns the body of the comprehension x as it was
+// written, or nil if the compiler did not reorder it.
+func (e *eval) comprehensionSourceOrder(x ast.Value) ast.Body {
+	// ast.QueryCompiler is an exported interface, so the accessor is reached
+	// through an assertion rather than added to it.
+	type sourceOrderer interface {
+		ComprehensionSourceOrder(ast.Value) ast.Body
+	}
+
+	if qc, ok := e.queryCompiler.(sourceOrderer); ok {
+		return qc.ComprehensionSourceOrder(x)
+	}
+	if e.compiler != nil {
+		return e.compiler.ComprehensionSourceOrder(x)
+	}
+	return nil
+}
+
+// comprehensionBody returns the body to evaluate for the comprehension x. The
+// compiler moves loop invariants to the front of comprehension bodies, which
+// assumes a built-in error leaves an expression undefined. That does not hold
+// under strict built-in errors — a hoisted expression would report an error the
+// policy as written never reaches — so the body as written is evaluated
+// instead.
+func (e *eval) comprehensionBody(x ast.Value, hoisted ast.Body) ast.Body {
+	if !e.strictBuiltinErrors {
+		return hoisted
+	}
+	if src := e.comprehensionSourceOrder(x); src != nil {
+		return src
+	}
+	return hoisted
 }
 
 func (e *eval) namespaceRef(ref ast.Ref) ast.Ref {
