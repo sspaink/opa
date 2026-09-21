@@ -6,6 +6,7 @@ package topdown
 
 import (
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/open-policy-agent/opa/v1/ast"
@@ -86,8 +87,11 @@ func TestRegexBuiltinCache(t *testing.T) {
 func TestRegexBuiltinInterQueryValueCache(t *testing.T) {
 	t.Parallel()
 
-	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": "10"},}`)
-	config, _ := cache.ParseCachingConfig(ip)
+	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": 10, "named": {"regex": {"max_num_entries": 10}}}}`)
+	config, err := cache.ParseCachingConfig(ip)
+	if err != nil {
+		t.Fatalf("parse caching config: %v", err)
+	}
 	interQueryValueCache := cache.NewInterQueryValueCache(t.Context(), config)
 
 	ctx := BuiltinContext{InterQueryBuiltinValueCache: interQueryValueCache}
@@ -99,12 +103,12 @@ func TestRegexBuiltinInterQueryValueCache(t *testing.T) {
 		ast.NewTerm(ast.String(regex1)),
 		ast.NewTerm(ast.String("foobar")),
 	}
-	err := builtinRegexMatch(ctx, operands, iter)
+	err = builtinRegexMatch(ctx, operands, iter)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	if _, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(regex1).Value); !ok {
+	if _, ok := ctx.InterQueryBuiltinValueCache.GetCache(regexCacheName).Get(ast.StringTerm(regex1).Value); !ok {
 		t.Fatalf("Expected regex to be cached: %v", regex1)
 	}
 
@@ -131,7 +135,7 @@ func TestRegexBuiltinInterQueryValueCache(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	if _, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(regex2).Value); !ok {
+	if _, ok := ctx.InterQueryBuiltinValueCache.GetCache(regexCacheName).Get(ast.StringTerm(regex2).Value); !ok {
 		t.Fatalf("Expected regex to be cached: %v", regex2)
 	}
 }
@@ -139,8 +143,11 @@ func TestRegexBuiltinInterQueryValueCache(t *testing.T) {
 func TestRegexBuiltinInterQueryValueCacheTypeMismatch(t *testing.T) {
 	t.Parallel()
 
-	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": "10"},}`)
-	config, _ := cache.ParseCachingConfig(ip)
+	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": 10, "named": {"regex": {"max_num_entries": 10}}}}`)
+	config, err := cache.ParseCachingConfig(ip)
+	if err != nil {
+		t.Fatalf("parse caching config: %v", err)
+	}
 	interQueryValueCache := cache.NewInterQueryValueCache(t.Context(), config)
 
 	ctx := BuiltinContext{InterQueryBuiltinValueCache: interQueryValueCache}
@@ -148,29 +155,25 @@ func TestRegexBuiltinInterQueryValueCacheTypeMismatch(t *testing.T) {
 
 	key := "foo.*"
 
-	ctx.InterQueryBuiltinValueCache.Insert(ast.StringTerm(key).Value, "bar")
+	c := ctx.InterQueryBuiltinValueCache.GetCache(regexCacheName)
+	c.Insert(ast.StringTerm(key).Value, "bar")
 
 	operands := []*ast.Term{
 		ast.NewTerm(ast.String(key)),
 		ast.NewTerm(ast.String("foobar")),
 	}
-	err := builtinRegexMatch(ctx, operands, iter)
+	err = builtinRegexMatch(ctx, operands, iter)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	// verify the original cache entry is unchanged
-	value, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(key).Value)
+	// verify the entry was replaced rather than left poisoned
+	value, ok := c.Get(ast.StringTerm(key).Value)
 	if !ok {
 		t.Fatal("Expected key \"foo.*\" in cache")
 	}
 
-	actual, ok := value.(string)
-	if !ok {
-		t.Fatal("Expected string value")
-	}
-
-	if actual != "bar" {
-		t.Fatalf("Expected value \"bar\" but got %v", actual)
+	if _, ok := value.(*regexp.Regexp); !ok {
+		t.Fatalf("Expected *regexp.Regexp but got %T", value)
 	}
 }

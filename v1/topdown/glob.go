@@ -8,10 +8,12 @@ import (
 
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/topdown/builtins"
+	"github.com/open-policy-agent/opa/v1/topdown/cache"
 )
 
 const globCacheMaxSize = 100
 const globInterQueryValueCacheHits = "rego_builtin_glob_interquery_value_cache_hits"
+const globCacheName = "glob"
 
 var noDelimiters = []rune{}
 var dotDelimiters = []rune{'.'}
@@ -63,30 +65,22 @@ func builtinGlobMatch(bctx BuiltinContext, operands []*ast.Term, iter func(*ast.
 func globCompileAndMatch(bctx BuiltinContext, id, pattern, match string, delimiters []rune) (bool, error) {
 
 	if bctx.InterQueryBuiltinValueCache != nil {
-		// TODO: Use named cache
-		val, ok := bctx.InterQueryBuiltinValueCache.Get(ast.String(id))
-		if ok {
-			pat, valid := val.(*glob.Pattern)
-			if !valid {
-				// The cache key may exist for a different value type (eg. regex).
-				// In this case, we calculate the glob and return the result w/o updating the cache.
-				var err error
-				if pat, err = glob.Compile(pattern, delimiters...); err != nil {
-					return false, err
+		if c := bctx.InterQueryBuiltinValueCache.GetCache(globCacheName); c != nil {
+			key := ast.String(id)
+			if val, ok := c.Get(key); ok {
+				if pat, valid := val.(*glob.Pattern); valid {
+					bctx.Metrics.Counter(globInterQueryValueCacheHits).Incr()
+					return pat.Match(match), nil
 				}
-				return pat.Match(match), nil
 			}
-			bctx.Metrics.Counter(globInterQueryValueCacheHits).Incr()
-			out := pat.Match(match)
-			return out, nil
-		}
 
-		res, err := glob.Compile(pattern, delimiters...)
-		if err != nil {
-			return false, err
+			res, err := glob.Compile(pattern, delimiters...)
+			if err != nil {
+				return false, err
+			}
+			c.Insert(key, res)
+			return res.Match(match), nil
 		}
-		bctx.InterQueryBuiltinValueCache.Insert(ast.String(id), res)
-		return res.Match(match), nil
 	}
 
 	globCacheLock.RLock()
@@ -122,6 +116,10 @@ func builtinGlobQuoteMeta(_ BuiltinContext, operands []*ast.Term, iter func(*ast
 }
 
 func init() {
+	maxEntries := globCacheMaxSize
+	cache.RegisterDefaultInterQueryBuiltinValueCacheConfig(globCacheName,
+		&cache.NamedValueCacheConfig{MaxNumEntries: &maxEntries})
+
 	RegisterBuiltinFunc(ast.GlobMatch.Name, builtinGlobMatch)
 	RegisterBuiltinFunc(ast.GlobQuoteMeta.Name, builtinGlobQuoteMeta)
 }

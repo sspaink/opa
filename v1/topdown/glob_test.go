@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/gobwas/glob"
+
 	"github.com/open-policy-agent/opa/v1/ast"
+	"github.com/open-policy-agent/opa/v1/metrics"
 	"github.com/open-policy-agent/opa/v1/topdown/cache"
 )
 
@@ -148,8 +151,11 @@ func TestGlobMatchCompileError(t *testing.T) {
 func TestGlobBuiltinInterQueryValueCache(t *testing.T) {
 	t.Parallel()
 
-	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": "10"},}`)
-	config, _ := cache.ParseCachingConfig(ip)
+	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": 10, "named": {"glob": {"max_num_entries": 10}}}}`)
+	config, err := cache.ParseCachingConfig(ip)
+	if err != nil {
+		t.Fatalf("parse caching config: %v", err)
+	}
 	interQueryValueCache := cache.NewInterQueryValueCache(t.Context(), config)
 
 	ctx := BuiltinContext{InterQueryBuiltinValueCache: interQueryValueCache}
@@ -162,13 +168,13 @@ func TestGlobBuiltinInterQueryValueCache(t *testing.T) {
 		ast.NullTerm(),
 		ast.NewTerm(ast.String("foo/bar")),
 	}
-	err := builtinGlobMatch(ctx, operands, iter)
+	err = builtinGlobMatch(ctx, operands, iter)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	// the glob id will have a trailing '-' rune.
-	if _, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(glob1 + "-").Value); !ok {
+	if _, ok := ctx.InterQueryBuiltinValueCache.GetCache(globCacheName).Get(ast.StringTerm(glob1 + "-").Value); !ok {
 		t.Fatalf("Expected glob to be cached: %v", glob1)
 	}
 
@@ -197,7 +203,7 @@ func TestGlobBuiltinInterQueryValueCache(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	if _, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(glob2 + "-").Value); !ok {
+	if _, ok := ctx.InterQueryBuiltinValueCache.GetCache(globCacheName).Get(ast.StringTerm(glob2 + "-").Value); !ok {
 		t.Fatalf("Expected glob to be cached: %v", glob2)
 	}
 }
@@ -205,8 +211,11 @@ func TestGlobBuiltinInterQueryValueCache(t *testing.T) {
 func TestGlobBuiltinInterQueryValueCacheTypeMismatch(t *testing.T) {
 	t.Parallel()
 
-	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": "10"},}`)
-	config, _ := cache.ParseCachingConfig(ip)
+	ip := []byte(`{"inter_query_builtin_value_cache": {"max_num_entries": 10, "named": {"glob": {"max_num_entries": 10}}}}`)
+	config, err := cache.ParseCachingConfig(ip)
+	if err != nil {
+		t.Fatalf("parse caching config: %v", err)
+	}
 	interQueryValueCache := cache.NewInterQueryValueCache(t.Context(), config)
 
 	ctx := BuiltinContext{InterQueryBuiltinValueCache: interQueryValueCache}
@@ -219,36 +228,78 @@ func TestGlobBuiltinInterQueryValueCacheTypeMismatch(t *testing.T) {
 		ast.NullTerm(),
 		ast.NewTerm(ast.String("foo/bar")),
 	}
-	err := builtinGlobMatch(ctx, operands, iter)
+	err = builtinGlobMatch(ctx, operands, iter)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
+	c := ctx.InterQueryBuiltinValueCache.GetCache(globCacheName)
+
 	// the glob id will have a trailing '-' rune.
-	if _, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(key + "-").Value); !ok {
+	if _, ok := c.Get(ast.StringTerm(key + "-").Value); !ok {
 		t.Fatalf("Expected glob to be cached: %v", key)
 	}
 
-	// update the cache entry
-	ctx.InterQueryBuiltinValueCache.Insert(ast.StringTerm(key+"-").Value, "bar")
+	// poison the cache entry
+	c.Insert(ast.StringTerm(key+"-").Value, "bar")
 
 	err = builtinGlobMatch(ctx, operands, iter)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	// verify the cache entry is unchanged
-	value, ok := ctx.InterQueryBuiltinValueCache.Get(ast.StringTerm(key + "-").Value)
+	// verify the entry was replaced rather than left poisoned
+	value, ok := c.Get(ast.StringTerm(key + "-").Value)
 	if !ok {
 		t.Fatal("Expected key \"foo.*-\" in cache")
 	}
 
-	actual, ok := value.(string)
-	if !ok {
-		t.Fatal("Expected string value")
+	if _, ok := value.(*glob.Pattern); !ok {
+		t.Fatalf("Expected *glob.Pattern but got %T", value)
+	}
+}
+
+func TestGlobAndRegexInterQueryValueCachesAreSeparate(t *testing.T) {
+	t.Parallel()
+
+	config, err := cache.ParseCachingConfig(nil)
+	if err != nil {
+		t.Fatalf("parse caching config: %v", err)
 	}
 
-	if actual != "bar" {
-		t.Fatalf("Expected value \"bar\" but got %v", actual)
+	ctx := BuiltinContext{
+		InterQueryBuiltinValueCache: cache.NewInterQueryValueCache(t.Context(), config),
+		Metrics:                     metrics.New(),
+	}
+	iter := func(*ast.Term) error { return nil }
+
+	// A glob pattern with no delimiters gets the id "a-", which collides with a
+	// regex whose pattern happens to be that same string.
+	globOperands := []*ast.Term{
+		ast.NewTerm(ast.String("a")),
+		ast.NullTerm(),
+		ast.NewTerm(ast.String("a")),
+	}
+	regexOperands := []*ast.Term{
+		ast.NewTerm(ast.String("a-")),
+		ast.NewTerm(ast.String("xa-b")),
+	}
+
+	for range 2 {
+		if err := builtinGlobMatch(ctx, globOperands, iter); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if err := builtinRegexMatch(ctx, regexOperands, iter); err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+	}
+
+	// Each builtin must have served the second call from its own cache; when
+	// they shared a keyspace the collision left one of them recompiling forever.
+	if n := ctx.Metrics.Counter(globInterQueryValueCacheHits).Value(); n != uint64(1) {
+		t.Errorf("Expected 1 glob cache hit, got %v", n)
+	}
+	if n := ctx.Metrics.Counter(regexInterQueryValueCacheHits).Value(); n != uint64(1) {
+		t.Errorf("Expected 1 regex cache hit, got %v", n)
 	}
 }

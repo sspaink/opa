@@ -14,11 +14,13 @@ import (
 
 	"github.com/open-policy-agent/opa/v1/ast"
 	"github.com/open-policy-agent/opa/v1/topdown/builtins"
+	"github.com/open-policy-agent/opa/v1/topdown/cache"
 )
 
 const (
 	regexCacheMaxSize             = 100
 	regexInterQueryValueCacheHits = "rego_builtin_regex_interquery_value_cache_hits"
+	regexCacheName                = "regex"
 )
 
 var (
@@ -141,27 +143,22 @@ func builtinRegexSplit(bctx BuiltinContext, operands []*ast.Term, iter func(*ast
 
 func getRegexp(bctx BuiltinContext, pat string) (*regexp.Regexp, error) {
 	if bctx.InterQueryBuiltinValueCache != nil {
-		// TODO: Use named cache
-		var key ast.Value = ast.String(pat)
-		val, ok := bctx.InterQueryBuiltinValueCache.Get(key)
-		if ok {
-			res, valid := val.(*regexp.Regexp)
-			if !valid {
-				// The cache key may exist for a different value type (eg. glob).
-				// In this case, we calculate the regex and return the result w/o updating the cache.
-				return regexp.Compile(pat)
+		if c := bctx.InterQueryBuiltinValueCache.GetCache(regexCacheName); c != nil {
+			var key ast.Value = ast.String(pat)
+			if val, ok := c.Get(key); ok {
+				if res, valid := val.(*regexp.Regexp); valid {
+					bctx.Metrics.Counter(regexInterQueryValueCacheHits).Incr()
+					return res, nil
+				}
 			}
 
-			bctx.Metrics.Counter(regexInterQueryValueCacheHits).Incr()
-			return res, nil
+			re, err := regexp.Compile(pat)
+			if err != nil {
+				return nil, err
+			}
+			c.Insert(key, re)
+			return re, nil
 		}
-
-		re, err := regexp.Compile(pat)
-		if err != nil {
-			return nil, err
-		}
-		bctx.InterQueryBuiltinValueCache.Insert(key, re)
-		return re, nil
 	}
 
 	return regexpCacheGet(pat)
@@ -314,6 +311,10 @@ func builtinRegexReplace(bctx BuiltinContext, operands []*ast.Term, iter func(*a
 }
 
 func init() {
+	maxEntries := regexCacheMaxSize
+	cache.RegisterDefaultInterQueryBuiltinValueCacheConfig(regexCacheName,
+		&cache.NamedValueCacheConfig{MaxNumEntries: &maxEntries})
+
 	RegisterBuiltinFunc(ast.RegexIsValid.Name, builtinRegexIsValid)
 	RegisterBuiltinFunc(ast.RegexMatch.Name, builtinRegexMatch)
 	RegisterBuiltinFunc(ast.RegexMatchDeprecated.Name, builtinRegexMatch)
