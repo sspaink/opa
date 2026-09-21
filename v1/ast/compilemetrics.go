@@ -6,4 +6,5 @@ package ast
 
 const (
 	compileStageComprehensionIndexBuild = "compile_stage_comprehension_index_build"
+	compileStageComprehensionHoist      = "compile_stage_comprehension_hoist"
 )

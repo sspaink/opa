@@ -221,7 +221,7 @@ func TestWithOnlyStagesUpToInternal(t *testing.T) {
 		{
 			name:          "up to last stage",
 			target:        StageBuildRequiredCapabilities,
-			expectedCount: 35, // includes "after" stage from init()
+			expectedCount: 36, // includes "after" stage from init()
 			shouldContain: []StageID{
 				StageResolveRefs,
 				StageBuildRequiredCapabilities,

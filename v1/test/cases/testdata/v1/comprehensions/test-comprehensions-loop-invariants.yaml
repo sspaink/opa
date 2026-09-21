@@ -1,0 +1,81 @@
+---
+cases:
+  - note: comprehensions/loop-invariant call is scoped to the comprehension
+    query: data.test.p = x
+    modules:
+      - |
+        package test
+
+        f(x) := "p" if x == "a"
+
+        bar := ["p", "q"]
+
+        p[x] := y if {
+        	some x in {"a", "b"}
+        	y := {v | v := bar[_]; f(x) == v}
+        }
+    want_result:
+      - x:
+          a:
+            - p
+          b: []
+  - note: comprehensions/independent generator does not become the outer loop
+    query: data.test.p = x
+    data:
+      groups:
+        g: ["x", "y"]
+      ys: [1, 2]
+    modules:
+      - |
+        package test
+
+        p := y if {
+        	y := [[a, b] | xs := data.groups.g; a := xs[_]; b := data.ys[_]]
+        }
+    want_result:
+      - x:
+          - ["x", 1]
+          - ["x", 2]
+          - ["y", 1]
+          - ["y", 2]
+  - note: comprehensions/loop-invariant call preserves array comprehension order
+    query: data.test.p = x
+    modules:
+      - |
+        package test
+
+        items := ["c", "a", "b"]
+
+        f(x) := x
+
+        p := y if {
+        	x := "k"
+        	y := [v | v := items[_]; f(x) == "k"]
+        }
+    want_result:
+      - x:
+          - c
+          - a
+          - b
+  - note: comprehensions/loop-invariant call is re-evaluated per outer binding
+    query: data.test.p = x
+    modules:
+      - |
+        package test
+
+        f(x) := x + 1
+
+        bar := {1: "one", 2: "two", 3: "three"}
+
+        p[x] := y if {
+        	some x in [0, 1, 2]
+        	y := {v | bar[u] = v; f(x) == u}
+        }
+    want_result:
+      - x:
+          "0":
+            - one
+          "1":
+            - two
+          "2":
+            - three
