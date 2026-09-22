@@ -22,6 +22,47 @@ has decision logging enabled.
 See [the configuration documentation](./configuration/#distributed-tracing)
 for all OpenTelemetry-related configurable options.
 
+### Trace context propagation
+
+OPA takes part in traces started by its callers. When an incoming request
+carries a [W3C `traceparent`](https://www.w3.org/TR/trace-context/#traceparent-header)
+header, the span OPA creates for the request continues that trace instead of
+starting a new one: it reuses the caller's trace ID and records the caller's
+span as its parent. Spans emitted by `http.send` during evaluation are
+descendants of that span, and OPA sets a `traceparent` header on those outbound
+requests so the services it calls can continue the trace in turn.
+
+Trace context is only propagated when distributed tracing is configured. With no
+`distributed_tracing.type` set, OPA creates no spans and the `traceparent`
+header is ignored.
+
+### Correlating decision logs with traces
+
+With distributed tracing configured, [decision log](./management-decision-logs/)
+events carry the `trace_id` and `span_id` of the server span for the request, so
+a logged decision can be matched up with the trace it belongs to. Without it,
+the two fields are absent from the event.
+
+Recording them does not require the spans themselves to be exported: IDs are
+assigned before the sampler runs, so `sample_percentage: 0` still populates
+`trace_id` and `span_id` while dropping every span OPA would otherwise send to
+the collector.
+
+```yaml
+distributed_tracing:
+  type: grpc
+  sample_percentage: 0
+
+decision_logs:
+  console: true
+```
+
+Sampling is [parent-based](./configuration/#sampling), though, so this does not
+avoid the collector entirely: a request arriving with a `traceparent` whose
+`sampled` flag is set is recorded and exported regardless of
+`sample_percentage`. If upstream callers mark their traces as sampled, OPA still
+needs a reachable `address` to export to.
+
 ## Prometheus
 
 OPA exposes an HTTP endpoint that can be used to collect performance metrics

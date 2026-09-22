@@ -936,12 +936,17 @@ that requires GraphQL schemas.
 
 Distributed tracing represents the configuration of the OpenTelemetry Tracing.
 
+Setting `distributed_tracing.type` is also what makes OPA honor the W3C `traceparent` header on
+incoming requests and record `trace_id` and `span_id` on
+[decision log](./management-decision-logs/) events. See
+[Monitoring](./monitoring/#trace-context-propagation) for details.
+
 | Field                                                                    | Type       | Required                                                                                   | Description                                                                                                |
 | ------------------------------------------------------------------------ | ---------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
 | `distributed_tracing.type`                                               | `string`   | No                                                                                         | Setting this to "grpc" enables distributed tracing with an gRPC endpoint; or "http" with an HTTP endpoint. |
 | `distributed_tracing.address`                                            | `string`   | No (default: `localhost:4317` if `type` is `grpc` or `localhost:4318` if `type` is `http`) | Address of the OpenTelemetry Collector gRPC or HTTP endpoint.                                              |
 | `distributed_tracing.service_name`                                       | `string`   | No (default: `opa`)                                                                        | Logical name of the service.                                                                               |
-| `distributed_tracing.sample_percentage`                                  | `float64`  | No (default: `100`)                                                                        | Percentage of traces that are sampled and exported.                                                        |
+| `distributed_tracing.sample_percentage`                                  | `float64`  | No (default: `100`)                                                                        | Percentage of traces that are sampled and exported. Sampling is parent-based, see below.                   |
 | `distributed_tracing.encryption`                                         | `string`   | No (default: `off`)                                                                        | Configures TLS.                                                                                            |
 | `distributed_tracing.allow_insecure_tls`                                 | `bool`     | No (default: `false`)                                                                      | Allow insecure TLS.                                                                                        |
 | `distributed_tracing.tls_ca_cert_file`                                   | `string`   | No                                                                                         | The path to the root CA certificate.                                                                       |
@@ -965,6 +970,19 @@ The following encryption methods are supported:
 | `off`  | Disable TLS       |
 | `tls`  | Enable TLS        |
 | `mtls` | Enable mutual TLS |
+
+### Sampling
+
+`sample_percentage` decides which of the traces OPA starts itself are exported.
+Requests that arrive with a `traceparent` header are not OPA's to decide on:
+sampling is parent-based, so the caller's `sampled` flag wins over this setting
+in both directions. A request marked as sampled upstream is always exported, and
+one marked as not sampled never is.
+
+Spans are assigned their IDs before the sampler runs, so `sample_percentage: 0`
+still records `trace_id` and `span_id` on
+[decision log](./management-decision-logs/) events. See
+[Monitoring](./monitoring/#correlating-decision-logs-with-traces).
 
 ### Excluding endpoints from tracing
 

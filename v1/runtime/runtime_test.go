@@ -2474,3 +2474,119 @@ func TestInitDiskStoreLargeBundle(t *testing.T) {
 		}
 	})
 }
+
+func TestDistributedTracingDecisionLogTraceContext(t *testing.T) {
+	const (
+		traceID  = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parentID = "00f067aa0ba902b7"
+	)
+
+	for _, tc := range []struct {
+		note        string
+		tracing     string
+		traceparent string
+		expTraceID  string
+	}{
+		{
+			note:        "tracing disabled: no trace context is recorded",
+			traceparent: "00-" + traceID + "-" + parentID + "-01",
+		},
+		{
+			note:        "tracing enabled: the incoming trace is continued",
+			tracing:     "distributed_tracing:\n  type: grpc\n  address: localhost:14317\n",
+			traceparent: "00-" + traceID + "-" + parentID + "-01",
+			expTraceID:  traceID,
+		},
+		{
+			note:    "tracing enabled without traceparent: a new trace is started",
+			tracing: "distributed_tracing:\n  type: grpc\n  address: localhost:14317\n",
+		},
+		{
+			// Span IDs are assigned before the sampler runs, so decision logs carry
+			// trace context even when no span is ever exported.
+			note:    "tracing enabled, nothing sampled: trace context is still recorded",
+			tracing: "distributed_tracing:\n  type: grpc\n  address: localhost:14317\n  sample_percentage: 0\n",
+		},
+	} {
+		t.Run(tc.note, func(t *testing.T) {
+			ctx := t.Context()
+			dir := t.TempDir()
+
+			cfg := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(cfg, []byte("decision_logs:\n  console: true\n"+tc.tracing), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			policy := filepath.Join(dir, "example.rego")
+			if err := os.WriteFile(policy, []byte("package example\nresult := 1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			consoleLogger := testLog.New()
+			params := NewParams()
+			params.Logger = testLog.New()
+			params.ConsoleLogger = consoleLogger
+			params.Addrs = &[]string{"localhost:0"}
+			params.ConfigFile = cfg
+			params.Paths = []string{policy}
+
+			rt, err := NewRuntime(ctx, params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			go rt.StartServer(ctx)
+			if !test.Eventually(t, 5*time.Second, func() bool {
+				return rt.ServerStatus() == ServerInitialized && len(rt.Addrs()) > 0
+			}) {
+				t.Fatal("timed out waiting for server to start")
+			}
+
+			req, err := http.NewRequest(http.MethodPost, "http://"+rt.Addrs()[0]+"/v1/data/example/result", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.traceparent != "" {
+				req.Header.Set("traceparent", tc.traceparent)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			var fields map[string]any
+			for _, e := range consoleLogger.Entries() {
+				if e.Message == "Decision Log" {
+					fields = e.Fields
+				}
+			}
+			if fields == nil {
+				t.Fatal("did not find 'Decision Log' event in captured log entries")
+			}
+
+			gotTraceID, _ := fields["trace_id"].(string)
+			gotSpanID, _ := fields["span_id"].(string)
+
+			if tc.tracing == "" {
+				if gotTraceID != "" || gotSpanID != "" {
+					t.Fatalf("expected no trace context, got trace_id=%q span_id=%q", gotTraceID, gotSpanID)
+				}
+				return
+			}
+
+			if gotSpanID == "" {
+				t.Error("expected span_id to be recorded")
+			}
+			if gotSpanID == parentID {
+				t.Errorf("expected a fresh span_id, got the caller's %q", gotSpanID)
+			}
+			switch {
+			case tc.expTraceID != "":
+				if gotTraceID != tc.expTraceID {
+					t.Errorf("expected trace_id %q, got %q", tc.expTraceID, gotTraceID)
+				}
+			case gotTraceID == "":
+				t.Error("expected trace_id to be recorded")
+			}
+		})
+	}
+}
