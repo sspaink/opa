@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 
@@ -455,7 +456,7 @@ func (c *Discovery) applyLocalPluginConfigOverride(conf *config.Config) (*config
 		return nil, nil, err
 	}
 
-	parsedConf, err := config.ParseConfig(bs, c.manager.ID)
+	parsedConf, err := config.ParseConfigWithPolicy(bs, c.manager.ID, c.manager.ConfigValidationPolicy())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -528,6 +529,14 @@ func (c *Discovery) processBundle(ctx context.Context, b *bundleApi.Bundle) (*pl
 	overriddenConfig, overriddenKeys, err := c.applyLocalPluginConfigOverride(config)
 	if err != nil {
 		return nil, err
+	}
+
+	// The effective configuration is validated again, now with the manager's
+	// validation policy (if any); surface the warnings not already logged above.
+	for _, w := range overriddenConfig.Warnings {
+		if !slices.Contains(config.Warnings, w) {
+			c.logger.Warn("%s", w)
+		}
 	}
 
 	if err := c.manager.Reconfigure(overriddenConfig); err != nil {

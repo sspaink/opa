@@ -221,3 +221,58 @@ func TestStringSet(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyCheck(t *testing.T) {
+	modules := map[string]string{
+		"check.rego": `package test.check
+
+import data.test.limits
+
+warnings contains "big" if input.config.size > limits.warn
+
+errors contains "too big" if input.config.size > limits.max
+`,
+		"limits.rego": `package test.limits
+
+warn := 10
+
+max := 100
+`,
+	}
+	p := NewWithModules("test/check", modules, "data.test.check = x")
+
+	tests := map[string]struct {
+		size     int
+		warnings []string
+		err      string
+	}{
+		"nothing reported": {size: 1},
+		"warning":          {size: 50, warnings: []string{"big"}},
+		"error":            {size: 500, err: "too big"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			warnings, err := p.Check(t.Context(), map[string]any{"config": map[string]any{"size": tc.size}})
+			if tc.err != "" {
+				if err == nil || err.Error() != tc.err {
+					t.Fatalf("expected error %q, got %v", tc.err, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !slices.Equal(warnings, tc.warnings) {
+				t.Fatalf("want warnings %v, got %v", tc.warnings, warnings)
+			}
+		})
+	}
+}
+
+func TestPolicyCheckUndefined(t *testing.T) {
+	p := New("test/other.rego", "package test.other\n\nx := 1\n", "data.test.undefined = x")
+	warnings, err := p.Check(t.Context(), map[string]any{"config": map[string]any{}})
+	if err != nil || warnings != nil {
+		t.Fatalf("expected nothing reported for an undefined document, got %v, %v", warnings, err)
+	}
+}

@@ -224,6 +224,11 @@ type Params struct {
 	// form of `key=path/to/file`where the file contains the value to be used.
 	ConfigOverrideFiles []string
 
+	// ConfigValidationPolicies are paths to Rego files (or directories of them)
+	// that validate the OPA configuration in addition to OPA's built-in checks.
+	// Test files (_test.rego) are skipped. See config.ValidationPolicy.
+	ConfigValidationPolicies []string
+
 	// Output is the output stream used when run as an interactive shell. This
 	// is mostly for test purposes.
 	Output io.Writer
@@ -457,6 +462,11 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
 
+	configPolicy, err := loadConfigValidationPolicy(params.ConfigValidationPolicies)
+	if err != nil {
+		return nil, fmt.Errorf("config error: %w", err)
+	}
+
 	var versionChecker versioncheck.Checker
 	if params.EnableVersionCheck {
 		var err error
@@ -562,6 +572,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		plugins.WithHooks(params.Hooks),
 		plugins.WithMinTLSVersion(params.MinTLSVersion),
 		plugins.WithCipherSuites(params.CipherSuites),
+		plugins.WithConfigValidationPolicy(configPolicy),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("config error: %w", err)
@@ -618,6 +629,27 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	}
 
 	return rt, nil
+}
+
+// loadConfigValidationPolicy compiles the Rego files found at paths, skipping
+// tests, into a config validation policy. It returns nil when paths is empty.
+func loadConfigValidationPolicy(paths []string) (*opa_config.ValidationPolicy, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	result, err := loader.NewFileLoader().Filtered(paths, func(_ string, info os.FileInfo, _ int) bool {
+		return !info.IsDir() && (!strings.HasSuffix(info.Name(), bundle.RegoExt) || strings.HasSuffix(info.Name(), "_test"+bundle.RegoExt))
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	modules := make(map[string]string, len(result.Modules))
+	for _, m := range result.Modules {
+		modules[m.Name] = string(m.Raw)
+	}
+	return opa_config.NewValidationPolicy(modules)
 }
 
 // extractMetricsConfig returns the configuration for server metrics and parsing errors if any
