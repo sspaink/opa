@@ -1,6 +1,9 @@
 package server
 
-import "sync"
+import (
+	"container/list"
+	"sync"
+)
 
 type cache struct {
 	data    map[string]any
@@ -50,4 +53,60 @@ func (c *cache) Insert(k string, v any) {
 		}
 	}
 	c.mtx.Unlock()
+}
+
+// lruCache is a fixed-size cache that evicts the least recently used entry
+// once full. It is safe for concurrent use.
+type lruCache[K comparable, V any] struct {
+	mtx     sync.Mutex
+	maxSize int
+	order   *list.List // front is most recently used
+	items   map[K]*list.Element
+}
+
+type lruEntry[K comparable, V any] struct {
+	key   K
+	value V
+}
+
+func newLRUCache[K comparable, V any](maxSize int) *lruCache[K, V] {
+	return &lruCache[K, V]{
+		maxSize: maxSize,
+		order:   list.New(),
+		items:   make(map[K]*list.Element, maxSize),
+	}
+}
+
+func (c *lruCache[K, V]) Get(k K) (V, bool) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if e, ok := c.items[k]; ok {
+		c.order.MoveToFront(e)
+		return e.Value.(*lruEntry[K, V]).value, true
+	}
+	var zero V
+	return zero, false
+}
+
+func (c *lruCache[K, V]) Add(k K, v V) {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	if e, ok := c.items[k]; ok {
+		e.Value.(*lruEntry[K, V]).value = v
+		c.order.MoveToFront(e)
+		return
+	}
+	c.items[k] = c.order.PushFront(&lruEntry[K, V]{key: k, value: v})
+	if c.order.Len() > c.maxSize {
+		oldest := c.order.Back()
+		c.order.Remove(oldest)
+		delete(c.items, oldest.Value.(*lruEntry[K, V]).key)
+	}
+}
+
+func (c *lruCache[K, V]) Purge() {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+	c.order.Init()
+	clear(c.items)
 }

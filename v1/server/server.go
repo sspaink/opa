@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -146,8 +145,8 @@ type Server struct {
 	cipherSuites                *[]uint16
 	hooks                       hooks.Hooks
 
-	compileUnknownsCache     *lru.Cache[string, []ast.Ref]
-	compileMaskingRulesCache *lru.Cache[string, ast.Ref]
+	compileUnknownsCache     *lruCache[string, []ast.Ref]
+	compileMaskingRulesCache *lruCache[string, ast.Ref]
 }
 
 // Metrics defines the interface that the server requires for recording HTTP
@@ -180,8 +179,8 @@ type Loop func() error
 // New returns a new Server.
 func New() *Server {
 	s := Server{}
-	s.compileUnknownsCache, _ = lru.New[string, []ast.Ref](unknownsCacheSize)
-	s.compileMaskingRulesCache, _ = lru.New[string, ast.Ref](maskingRuleCacheSize)
+	s.compileUnknownsCache = newLRUCache[string, []ast.Ref](unknownsCacheSize)
+	s.compileMaskingRulesCache = newLRUCache[string, ast.Ref](maskingRuleCacheSize)
 	return &s
 }
 
