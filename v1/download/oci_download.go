@@ -389,6 +389,7 @@ func newOCITarget(plugin rest.HTTPAuthPlugin, config *rest.Config, ref string) (
 				Transport: &pluginRoundTripper{
 					base:   httpClient.Transport,
 					plugin: plugin,
+					host:   urlInfo.Host,
 				},
 			},
 			Cache: auth.NewCache(),
@@ -507,10 +508,14 @@ func (t *ociTarget) Exists(ctx context.Context, target ocispec.Descriptor) (bool
 type pluginRoundTripper struct {
 	base   http.RoundTripper
 	plugin rest.HTTPAuthPlugin
+	host   string
 }
 
 func (t *pluginRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Header.Get("Authorization") == "" {
+	// A redirect to another host (e.g. ECR -> S3 presigned URL) is already
+	// authorized by its URL, and must not receive the registry credentials.
+	crossHostRedirect := req.Response != nil && req.URL.Host != t.host
+	if req.Header.Get("Authorization") == "" && !crossHostRedirect {
 		if err := t.plugin.Prepare(req); err != nil {
 			return nil, fmt.Errorf("failed to prepare request: %w", err)
 		}
