@@ -123,11 +123,7 @@ func builtinJSONUnmarshal(_ BuiltinContext, operands []*ast.Term, iter func(*ast
 		return err
 	}
 
-	var x any
-	if err := util.UnmarshalJSON(bs, &x); err != nil {
-		return err
-	}
-	v, err := ast.InterfaceToValue(x)
+	v, err := jsonToValue(bs)
 	if err != nil {
 		return err
 	}

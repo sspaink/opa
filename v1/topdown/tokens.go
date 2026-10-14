@@ -1246,12 +1246,12 @@ func extractJSONObject(s string) (ast.Object, error) {
 	// to parsing it ourselves, we're relying on the Go implementation
 	// using the last occurring instance of the key, which is the behavior
 	// as of Go 1.8.1.
-	v, err := getResult(builtinJSONUnmarshal, ast.StringTerm(s))
+	v, err := jsonToValue([]byte(s))
 	if err != nil {
 		return nil, fmt.Errorf("invalid JSON: %v", err)
 	}
 
-	o, ok := v.Value.(ast.Object)
+	o, ok := v.(ast.Object)
 	if !ok {
 		return nil, errors.New("decoded JSON type was not an Object")
 	}
